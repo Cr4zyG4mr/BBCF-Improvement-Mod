@@ -1,0 +1,371 @@
+--- a/src/CBR/CbrInterface.cpp
++++ b/src/CBR/CbrInterface.cpp
+@@ -1564,17 +1564,18 @@
+ std::string CbrInterface::GetPlayerID() {
+ 	try
+ 	{
+-		//Get ProcId of the target process
+-		DWORD procId = GetProcId(L"BBCF.exe");
+-		//Getmodulebaseaddress
+-		uintptr_t moduleBase = GetModuleBaseAddress(procId, L"BBCF.exe");
++		// We are already running inside BBCF.exe.  Avoid Toolhelp snapshots and
++		// PROCESS_ALL_ACCESS on our own process; those are unnecessary and are
++		// more fragile under Wine/Proton.
++		uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
++		if (moduleBase == 0) { return ""; }
+ 		uintptr_t p1NamePtr = moduleBase + 0x662740;
+-		HANDLE hProcess = 0;
+-		hProcess = OpenProcess(PROCESS_ALL_ACCESS, NULL, procId);
+ 
+ 		char playerID[35]{ 0 };
+-
+-		ReadProcessMemory(hProcess, (BYTE*)p1NamePtr, &playerID, 34, 0);
++		SIZE_T bytesRead = 0;
++		if (!ReadProcessMemory(GetCurrentProcess(), (BYTE*)p1NamePtr, &playerID, 34, &bytesRead) || bytesRead == 0) {
++			return "";
++		}
+ 		nameP1 = "";
+ 
+ 		for (int i = 0; i < 35; i++) {
+@@ -1608,20 +1609,24 @@
+ void CbrInterface::SetPlayerNames() {
+ 	try
+ 	{
+-		//Get ProcId of the target process
+-		DWORD procId = GetProcId(L"BBCF.exe");
+-		//Getmodulebaseaddress
+-		uintptr_t moduleBase = GetModuleBaseAddress(procId, L"BBCF.exe");
++		// Read BBCF's own memory directly through the current-process handle.
++		// This avoids PROCESS_ALL_ACCESS / module-snapshot quirks under Wine.
++		uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
++		if (moduleBase == 0) { return; }
+ 		uintptr_t p1NamePtr = moduleBase + 0x115B51C;
+ 		uintptr_t p2NamePtr = moduleBase + 0x115B5E6;
+-		HANDLE hProcess = 0;
+-		hProcess = OpenProcess(PROCESS_ALL_ACCESS, NULL, procId);
+ 
+ 		char p1CharName[35]{ 0 };
+ 		char p2CharName[35]{ 0 };
+-
+-		ReadProcessMemory(hProcess, (BYTE*)p1NamePtr, &p1CharName, 34, 0);
+-		ReadProcessMemory(hProcess, (BYTE*)p2NamePtr, &p2CharName, 34, 0);
++		SIZE_T p1BytesRead = 0;
++		SIZE_T p2BytesRead = 0;
++
++		if (!ReadProcessMemory(GetCurrentProcess(), (BYTE*)p1NamePtr, &p1CharName, 34, &p1BytesRead) ||
++			!ReadProcessMemory(GetCurrentProcess(), (BYTE*)p2NamePtr, &p2CharName, 34, &p2BytesRead) ||
++			p1BytesRead == 0 || p2BytesRead == 0)
++		{
++			return;
++		}
+ 		nameP1 = "";
+ 		nameP2 = "";
+ 
+--- a/src/CBR/CbrInterface.h
++++ b/src/CBR/CbrInterface.h
+@@ -122,8 +122,8 @@
+ 	bool firstInputParser = false;
+ 	int debugReplayNr = 0;
+ 	std::deque<char> inputs;
+-	int input;
+-	int inputP2;
++	int input = 5;
++	int inputP2 = 5;
+ 	std::array<int, 2> debugErrorCounter = { 0,0 };
+ 	int pMatchState = 0;
+ 	int debugNr = -1;
+@@ -147,9 +147,9 @@
+ 	void CbrInterface::SaveWeights(costWeights cst);
+ 	costWeights CbrInterface::LoadWeights(std::string in);
+ 
+-	bool reversalRecording;
+-	bool reversalRecordingActive;
+-	bool reversalActive;
++	bool reversalRecording = false;
++	bool reversalRecordingActive = false;
++	bool reversalActive = false;
+ 	int reversalReplayNr = 0;
+ 	bool blockStanding = false;
+ 	bool blockCrouching = false;
+@@ -177,10 +177,10 @@
+ 	void CbrInterface::UpdateOldCbrMetadata();
+ 
+ 	void CbrInterface::Checkinputs();
+-	int debugPrint1;
+-	int debugPrint2;
+-	int debugPrint3;
+-	int debugPrint4;
++	int debugPrint1 = 0;
++	int debugPrint2 = 0;
++	int debugPrint3 = 0;
++	int debugPrint4 = 0;
+ 	HANDLE hProcess = 0;
+ 	uintptr_t moduleBase = 0;
+ 	uintptr_t input5Ptr = 0;
+--- a/src/Game/MatchState.cpp
++++ b/src/Game/MatchState.cpp
+@@ -17,7 +17,24 @@
+ 
+ 	g_interfaces.pPaletteManager->LoadPaletteSettingsFile();
+ 	g_interfaces.pPaletteManager->OnMatchInit(g_interfaces.player1, g_interfaces.player2);
+-	g_interfaces.cbrInterface.OnMatchInit(*g_interfaces.player1.GetData(), *g_interfaces.player2.GetData(), *g_gameVals.pGameMode);
++
++	// CBR hooks can fire slightly earlier under Wine/Proton than they do on
++	// native Windows.  Avoid constructing CBR match state from null character
++	// pointers during the transition into Training/Versus/Online.
++	if (g_gameVals.pGameMode != nullptr &&
++		!g_interfaces.player1.IsCharDataNullPtr() &&
++		!g_interfaces.player2.IsCharDataNullPtr())
++	{
++		g_interfaces.cbrInterface.OnMatchInit(
++			*g_interfaces.player1.GetData(),
++			*g_interfaces.player2.GetData(),
++			*g_gameVals.pGameMode
++		);
++	}
++	else
++	{
++		LOG(2, "Skipping CBR OnMatchInit: game/character pointers are not ready yet.\n");
++	}
+ 	if (g_interfaces.pRoomManager->IsRoomFunctional())
+ 	{
+ 		// Prevent loading palettes.ini custom palette on opponent
+--- a/src/Game/Player.cpp
++++ b/src/Game/Player.cpp
+@@ -22,6 +22,11 @@
+ 
+ CharData* Player::GetData() const
+ {
++	// Proton/Wine can reach CBR/menu hooks before the game has populated the
++	// character pointer-to-pointer.  Do not dereference an undiscovered pointer.
++	if (m_charData == nullptr)
++		return nullptr;
++
+ 	return *m_charData;
+ }
+ 
+--- a/src/Game/Player.h
++++ b/src/Game/Player.h
+@@ -55,7 +55,7 @@
+ 	void Player::RestartCbrActivities(char* p1charName, char* p2charName, int p1charId, int p2charId);
+ 	*/
+ private:
+-	CharData** m_charData;
++	CharData** m_charData = nullptr;
+ 	CharPaletteHandle m_charPalHandle;
+ 	/*AnnotatedReplay aReplay;
+ 	CbrData cbrData;
+--- a/src/Hooks/hooks_cbr.cpp
++++ b/src/Hooks/hooks_cbr.cpp
+@@ -5,6 +5,21 @@
+ #include "Core/interfaces.h"
+ #include "Core/logger.h"
+ #include "Game/gamestates.h"
++
++namespace
++{
++	// The CBR input hooks are installed globally, including while the game is in
++	// menus and while a match is being constructed.  On Proton/Wine those hooks
++	// can be reached before BBCF has populated all of the pointers the CBR layer
++	// expects.  Native Windows tends to hide this timing bug.
++	bool IsCbrGameStateReady()
++	{
++		return g_gameVals.pGameMode != nullptr &&
++			g_gameVals.pMatchState != nullptr &&
++			!g_interfaces.player1.IsCharDataNullPtr() &&
++			!g_interfaces.player2.IsCharDataNullPtr();
++	}
++}
+ 
+ std::string hexify(unsigned int n)
+ {
+@@ -31,11 +46,18 @@
+ 		mov[esi], di
+ 		mov[addr], esi
+ 		mov playerNr, ebx
++
++		// CBRLogic is ordinary C++ and may clobber volatile registers/flags.
++		// Preserve the exact machine state expected by BBCF after the hook.
++		pushfd
++		pushad
+ 	}
+ 
+ 	CBRLogic(addr, 5, true, true, playerNr);
+ 	__asm
+ 	{
++		popad
++		popfd
+ 		jmp[P1InputJmpBackAddr]
+ 	}
+ }
+@@ -56,7 +78,9 @@
+ 	//CBRLogic(addr, 5, playerNr);
+ 	__asm
+ 	{
+-		jmp[P1InputJmpBackAddr]
++		// This hook has its own continuation address.  The original code jumped
++		// through P1InputJmpBackAddr, which can return into the wrong function.
++		jmp[P1InputNetplayJmpBackAddr]
+ 	}
+ }
+ 
+@@ -71,10 +95,14 @@
+ 		mov[esi], ax
+ 		mov[addr], esi
+ 		mov playerNr, ebx
++		pushfd
++		pushad
+ 	}
+ 	CBRLogic(addr, 4, true, true, playerNr);
+ 	__asm
+ 	{
++		popad
++		popfd
+ 		jmp[P2InputJmpBackAddr]
+ 	}
+ }
+@@ -91,6 +119,8 @@
+ 		mov input, eax
+ 		mov playerNum, edi
+ 		mov[addr], esi
++		pushfd
++		pushad
+ 	}
+ 
+ 
+@@ -117,6 +147,8 @@
+ 
+ 	__asm
+ 	{
++		popad
++		popfd
+ 		mov eax, input
+ 		cmp dword ptr[esi + 04], 00
+ 		movzx ebx, ax
+@@ -136,9 +168,11 @@
+ 		movzx ebx, word ptr[eax + edx * 4 + 00062D8Ch]
+ 		mov input, ebx
+ 		mov playerNum, edi
++		pushfd
++		pushad
+ 	}
+ 	//g_interfaces.cbrInterface.Checkinputs();
+-	if (*g_gameVals.pGameMode == GameMode_Online && input != 0) {
++	if (g_gameVals.pGameMode != nullptr && *g_gameVals.pGameMode == GameMode_Online && input != 0) {
+ 		input = CBRLogic(input, 0, playerNum, -1, true, false, true);//true
+ 	}
+ 	else {
+@@ -147,6 +181,8 @@
+ 
+ 	__asm
+ 	{
++		popad
++		popfd
+ 		mov ebx, input
+ 		jmp[P2ReadNetplayJmpBackAddr]
+ 	}
+@@ -172,7 +208,7 @@
+ }*/
+ 
+ int CBRLogic(int input, int hirarchy, int playerNr, int controllerNr, bool read, bool write, bool netplayMemory) {
+-	if (playerNr < 0 || playerNr > 1) {
++	if (playerNr < 0 || playerNr > 1 || !IsCbrGameStateReady()) {
+ 		return input;
+ 	}
+ #ifdef DEBUG
+@@ -274,6 +310,10 @@
+ }
+ 
+ void CBRLogic(char* addr, int hirarchy, bool readOnly, bool writeOnly, int playerNr, bool netplayMemory) {
++	if (addr == nullptr || !IsCbrGameStateReady()) {
++		return;
++	}
++
+ 	uint8 input0 = (uint8)addr[0];
+ 	uint8 input1 = ((uint8)addr[1]);
+ 	uint16 input = input0 + input1 * 256;
+@@ -298,6 +338,9 @@
+ 
+ int CBRLogic(int input, int playerNr, int controllerNr, bool readOnly, bool writeOnly, bool netplayMemory) {
+ 	static std::array<int, 2> oldInput{ 5,5 };
++	if (playerNr < 0 || playerNr > 1 || !IsCbrGameStateReady()) {
++		return input;
++	}
+ 	g_interfaces.cbrInterface.debugNr = playerNr;
+ 	if (playerNr == 0) {
+ 
+@@ -308,6 +351,7 @@
+ 		if (g_interfaces.cbrInterface.netaPlaying || g_interfaces.cbrInterface.netaRecording || g_interfaces.cbrInterface.autoRecordActive || g_interfaces.cbrInterface.Replaying || g_interfaces.cbrInterface.Recording || g_interfaces.cbrInterface.instantLearning == true || g_interfaces.cbrInterface.instantLearningP2 == true) {
+ 
+ 			auto meta = RecordCbrMetaData(0, oldInput[playerNr]);
++			if (meta == nullptr) { return input; }
+ 			meta->computeMetaData();
+ 			RecordCbrHelperData(meta, 0);
+ 
+@@ -343,6 +387,7 @@
+ 		if (g_interfaces.cbrInterface.netaPlaying || g_interfaces.cbrInterface.netaRecording || g_interfaces.cbrInterface.autoRecordActive || g_interfaces.cbrInterface.ReplayingP2 || g_interfaces.cbrInterface.RecordingP2 || g_interfaces.cbrInterface.instantLearning == true || g_interfaces.cbrInterface.instantLearningP2 == true) {
+ 
+ 			auto meta = RecordCbrMetaData(1, oldInput[playerNr]);
++			if (meta == nullptr) { return input; }
+ 			meta->computeMetaData();
+ 			RecordCbrHelperData(meta, 1);
+ 			//input = reversalLogic(input, meta, 2, readOnly, writeOnly);
+@@ -376,9 +421,11 @@
+ 
+ int reversalLogic(int input, int playerNR, bool readOnly, bool writeOnly) {
+ 	static std::array<int, 2> oldInput{ 5,5 };
+-	if (g_interfaces.cbrInterface.reversalRecording || g_interfaces.cbrInterface.reversalActive) {
++	if (playerNR < 0 || playerNR > 1) { return input; }
++	if ((g_interfaces.cbrInterface.reversalRecording || g_interfaces.cbrInterface.reversalActive) && IsCbrGameStateReady()) {
+ 
+ 		auto meta = RecordCbrMetaData(0, oldInput[playerNR]);
++		if (meta == nullptr) { return input; }
+ 		meta->computeMetaData();
+ 		RecordCbrHelperData(meta, 0);
+ 
+@@ -482,6 +529,8 @@
+ std::array<int, 2> oldPosY;
+ 
+ void InactiveMetaDataUpdate(bool PlayerIndex, int input) {
++	if (!IsCbrGameStateReady()) { return; }
++
+ 	CharData* focusCharData;
+ 	CharData* enemyCharData;
+ 	if (PlayerIndex == 0) {
+@@ -501,6 +550,7 @@
+ 
+ std::shared_ptr<Metadata> RecordCbrMetaData(bool PlayerIndex, int input) {
+ 	//static std::array<FixedQueue<int, 5>, 2> inputBuffer;
++	if (!IsCbrGameStateReady()) { return nullptr; }
+ 
+ 	CharData* focusCharData;
+ 	CharData* enemyCharData;
+@@ -932,9 +982,14 @@
+ }
+ 
+ void RecordCbrHelperData(std::shared_ptr<Metadata> me, bool PlayerIndex) {
++	if (me == nullptr || !IsCbrGameStateReady() || g_gameVals.pEntityList == nullptr || g_gameVals.entityCount <= 0) {
++		return;
++	}
++
+ 	for (int i = 0; i < g_gameVals.entityCount; i++)
+ 	{
+ 		CharData* pEntity = (CharData*)g_gameVals.pEntityList[i];
++		if (pEntity == nullptr) { continue; }
+ 		const bool isCharacter = i < 2;
+ 		const bool isEntityActive = pEntity->unknownStatus1 == 1;
+ 		bool attacking = pEntity->attackLevel > 0;
+--- a/src/Overlay/Window/CbrServerWindow.cpp
++++ b/src/Overlay/Window/CbrServerWindow.cpp
+@@ -31,8 +31,9 @@
+ 	}
+ 
+ 	//Resetting window LoadNr variable when not in a match to prevent loading while in menu.
+-	if (!isInMatch() || !(*g_gameVals.pGameMode == GameMode_Training || *g_gameVals.pGameMode == GameMode_Versus ||
+-		*g_gameVals.pGameMode == GameMode_Online))
++	if (!isInMatch() || g_gameVals.pGameMode == nullptr ||
++		!(*g_gameVals.pGameMode == GameMode_Training || *g_gameVals.pGameMode == GameMode_Versus ||
++		  *g_gameVals.pGameMode == GameMode_Online))
+ 	{
+ 		g_interfaces.cbrInterface.windowLoadNr = -1;
+ 	}
