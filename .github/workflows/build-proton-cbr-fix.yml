@@ -1,0 +1,36 @@
+name: Build Proton CBR fix
+
+on:
+  push:
+    branches:
+      - proton-cbr-fix
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply Proton/Wine CBR patch
+        shell: pwsh
+        run: git apply --verbose proton-cbr-ci.patch
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release Win32
+        shell: pwsh
+        run: msbuild BBCF_IM.sln /m /p:Configuration=Release /p:Platform=Win32 /p:VcpkgEnabled=false
+
+      - name: Upload patched mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: BBCF-Improvement-Mod-Proton-CBR-patched
+          path: |
+            bin/Release/dinput8.dll
+            bin/Release/settings.ini
+            bin/Release/palettes.ini
+          if-no-files-found: error
