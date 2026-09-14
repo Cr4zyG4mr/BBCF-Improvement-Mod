@@ -18,6 +18,10 @@ jobs:
         shell: pwsh
         run: git apply --verbose proton-cbr-ci.patch
 
+      - name: Apply replay deletion safety patch
+        shell: pwsh
+        run: git apply --verbose cbr-replay-delete-safety.patch
+
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
         with:
