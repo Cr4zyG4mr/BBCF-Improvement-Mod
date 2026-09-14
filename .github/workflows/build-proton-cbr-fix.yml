@@ -23,14 +23,20 @@ jobs:
         with:
           msbuild-architecture: x86
 
-      - name: Install Boost dependencies
+      - name: Install Boost and OpenSSL dependencies
         shell: pwsh
         run: |
           if (-not $env:VCPKG_INSTALLATION_ROOT) {
             throw "VCPKG_INSTALLATION_ROOT is not defined on this runner"
           }
           $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
-          & $vcpkg install boost-filesystem:x86-windows-static boost-iostreams:x86-windows-static boost-serialization:x86-windows-static boost-thread:x86-windows-static
+          & $vcpkg install `
+            boost-filesystem:x86-windows-static `
+            boost-iostreams:x86-windows-static `
+            boost-serialization:x86-windows-static `
+            boost-thread:x86-windows-static `
+            boost-numeric-ublas:x86-windows-static `
+            openssl:x86-windows-static
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $vcpkg integrate install
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
