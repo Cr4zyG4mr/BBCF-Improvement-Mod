@@ -20,10 +20,24 @@ jobs:
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x86
+
+      - name: Install Boost dependencies
+        shell: pwsh
+        run: |
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            throw "VCPKG_INSTALLATION_ROOT is not defined on this runner"
+          }
+          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
+          & $vcpkg install boost-filesystem:x86-windows-static boost-iostreams:x86-windows-static boost-serialization:x86-windows-static boost-thread:x86-windows-static
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $vcpkg integrate install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Release Win32
         shell: pwsh
-        run: msbuild BBCF_IM.sln /m /p:Configuration=Release /p:Platform=Win32 /p:VcpkgEnabled=false
+        run: msbuild BBCF_IM.sln /m /p:Configuration=Release /p:Platform=Win32 /p:VcpkgEnabled=true /p:VcpkgTriplet=x86-windows-static
 
       - name: Upload patched mod
         uses: actions/upload-artifact@v4
