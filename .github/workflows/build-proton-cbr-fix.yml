@@ -23,7 +23,7 @@ jobs:
         with:
           msbuild-architecture: x86
 
-      - name: Install Boost and OpenSSL dependencies
+      - name: Install native dependencies
         shell: pwsh
         run: |
           if (-not $env:VCPKG_INSTALLATION_ROOT) {
@@ -31,6 +31,8 @@ jobs:
           }
           $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
           & $vcpkg install `
+            boost-algorithm:x86-windows-static `
+            boost-beast:x86-windows-static `
             boost-filesystem:x86-windows-static `
             boost-iostreams:x86-windows-static `
             boost-serialization:x86-windows-static `
@@ -41,9 +43,33 @@ jobs:
           & $vcpkg integrate install
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          # Fail early if any directly-used third-party headers are still absent.
+          $includeRoot = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\x86-windows-static\include"
+          $requiredHeaders = @(
+            "boost\algorithm\string.hpp",
+            "boost\archive\binary_iarchive.hpp",
+            "boost\beast\core\detail\base64.hpp",
+            "boost\filesystem.hpp",
+            "boost\iostreams\filter\gzip.hpp",
+            "boost\numeric\ublas\storage.hpp",
+            "boost\thread.hpp",
+            "openssl\ssl.h"
+          )
+          foreach ($header in $requiredHeaders) {
+            $headerPath = Join-Path $includeRoot $header
+            if (-not (Test-Path $headerPath)) {
+              throw "Required dependency header is missing: $headerPath"
+            }
+          }
+
       - name: Build Release Win32
         shell: pwsh
-        run: msbuild BBCF_IM.sln /m /p:Configuration=Release /p:Platform=Win32 /p:VcpkgEnabled=true /p:VcpkgTriplet=x86-windows-static
+        run: |
+          # cpp-httplib's SSLClient uses OpenSSL directly. vcpkg supplies the
+          # library search path; LINK supplies the libraries themselves.
+          $env:LINK = "/DEFAULTLIB:libssl.lib /DEFAULTLIB:libcrypto.lib $env:LINK"
+          msbuild BBCF_IM.sln /m /p:Configuration=Release /p:Platform=Win32 /p:VcpkgEnabled=true /p:VcpkgTriplet=x86-windows-static
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload patched mod
         uses: actions/upload-artifact@v4
