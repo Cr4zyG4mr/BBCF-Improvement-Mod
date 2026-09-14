@@ -1,7 +1,7 @@
 diff --git a/src/CBR/CbrSearchTree.h b/src/CBR/CbrSearchTree.h
 --- a/src/CBR/CbrSearchTree.h
 +++ b/src/CBR/CbrSearchTree.h
-@@ -135,8 +135,9 @@ public:
+@@ -135,7 +135,8 @@ public:
  
          std::vector<CbrReplayFile>* replayFiles = &replayFilesIn;
          int replayIndex = 0;
@@ -22,7 +22,7 @@ diff --git a/src/CBR/CbrSearchTree.h b/src/CBR/CbrSearchTree.h
              if (bestCandidate.similarity > dissimilarity + dissExtra) {
                  bestCandidate.treePos.y = y;
                  bestCandidate.treePos.x = x;
-@@ -191,8 +194,9 @@ public:
+@@ -191,7 +194,8 @@ public:
  
          auto* replayFiles = &replayFilesIn;
          int replayIndex = 0;
@@ -83,10 +83,10 @@ diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
 +                    return 5;
 +                }
                  bestReplayFile = &replayFiles[selectedCase.replayIndex];
-+            }
+             }
 +            if (selectedCase.caseIndex < 0 || selectedCase.caseIndex >= bestReplayFile->getCaseBaseLength()) {
 +                resetCbr();
 +                return 5;
-             }
++            }
              bestFrame = bestReplayFile->getCase(selectedCase.caseIndex)->getStartingIndex();
          }
