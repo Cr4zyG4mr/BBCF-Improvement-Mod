@@ -1,0 +1,38 @@
+diff --git a/src/Overlay/Window/CbrServerWindow.cpp b/src/Overlay/Window/CbrServerWindow.cpp
+--- a/src/Overlay/Window/CbrServerWindow.cpp
++++ b/src/Overlay/Window/CbrServerWindow.cpp
+@@ -113,8 +113,11 @@ namespace
+             g_playerCharacter,
+             g_opponentCharacter,
+             g_replayCountMin);
+-        if (!bufferData.is_null())
++        // CharacterStorage uses `return NULL` while an async JSON request is
++        // still pending. With nlohmann::json that sentinel becomes integer 0,
++        // not JSON null, so accepting every non-null value erases the last
++        // valid table one frame after it arrives. Only arrays are table results.
++        if (bufferData.is_array())
+             g_serverJsonData = bufferData;
+@@ -127,7 +130,7 @@ namespace
+                 g_playerCharacter,
+                 g_opponentCharacter,
+                 g_replayCountMin);
+-            if (!bufferData.is_null())
++            if (bufferData.is_array())
+                 g_serverJsonData = bufferData;
+@@ -201,8 +204,11 @@ namespace
+             g_playerCharacter,
+             g_opponentCharacter,
+             g_replayCountMin);
+-        if (!bufferData.is_null())
++        // Keep the last completed result visible while the next async refresh
++        // is pending. See the server-data path above for the NULL/json(0)
++        // compatibility detail.
++        if (bufferData.is_array())
+             g_localJsonData = bufferData;
+@@ -215,7 +221,7 @@ namespace
+                 g_playerCharacter,
+                 g_opponentCharacter,
+                 g_replayCountMin);
+-            if (!bufferData.is_null())
++            if (bufferData.is_array())
+                 g_localJsonData = bufferData;

@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Apply modern CharData compatibility shim
+      - name: Apply CBR compatibility patches
         shell: pwsh
         run: |
           git apply --check cbr-modern-compat.patch
@@ -25,20 +25,9 @@ jobs:
           git apply --verbose cbr-modern-compat.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Apply CBR runtime safety patch
-        shell: pwsh
-        run: |
-          git apply --check cbr-runtime-safety.patch
+          git apply --check cbr-data-manager-json-fix.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git apply --verbose cbr-runtime-safety.patch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Apply replay deletion safety patch
-        shell: pwsh
-        run: |
-          git apply --check cbr-replay-delete-safety.patch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git apply --verbose cbr-replay-delete-safety.patch
+          git apply --verbose cbr-data-manager-json-fix.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Set up MSBuild
