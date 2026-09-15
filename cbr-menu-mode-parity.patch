@@ -1,0 +1,145 @@
+diff --git a/src/Overlay/Window/MainMenu/PageTraining.cpp b/src/Overlay/Window/MainMenu/PageTraining.cpp
+--- a/src/Overlay/Window/MainMenu/PageTraining.cpp
++++ b/src/Overlay/Window/MainMenu/PageTraining.cpp
+@@ -31,4 +31,4 @@ namespace MainMenu
+-		void DrawCbrPlayerControls(int playerIndex, bool mirrorMatch, WindowContainer* container)
++		void DrawCbrPlayerControls(int playerIndex, bool mirrorMatch, bool allowAiControl, WindowContainer* container)
+ 		{
+ 			CbrInterface& cbr = g_interfaces.cbrInterface;
+ 			Player& player = playerIndex == 0 ? g_interfaces.player1 : g_interfaces.player2;
+@@ -70,6 +70,8 @@ namespace MainMenu
+ 				}
+ 			}
+ 
++			if (allowAiControl)
++			{
+ 			const char* replayLabel = replaying ? "Stop replay" : "Replay AI";
+ 			if (ImGui::Button(replayLabel, ImVec2(-1.0f, 0.0f)))
+ 			{
+@@ -112,6 +114,7 @@ namespace MainMenu
+ 			{
+ 				ImGui::TextDisabled("Instant learning needs a mirror match.");
+ 			}
++			}
+ 
+ 			if (ImGui::Button("Delete range", ImVec2(-1.0f, 0.0f)))
+ 			{
+@@ -151,11 +154,16 @@ namespace MainMenu
+ 			ImGui::PopID();
+ 		}
+ 
+-		void DrawCbrSection(bool inTraining, WindowContainer* container)
++		void DrawCbrSection(WindowContainer* container)
+ 		{
+ 			CbrInterface& cbr = g_interfaces.cbrInterface;
+ 			cbr.loadSettings(&cbr);
+ 
++			const int gameMode = g_gameVals.pGameMode ? *g_gameVals.pGameMode : -1;
++			const bool supportedMatch = isInMatch() &&
++				(gameMode == GameMode_Training || gameMode == GameMode_Versus || gameMode == GameMode_Online);
++			const bool inVersus = supportedMatch && gameMode == GameMode_Versus;
++
+ 			Hint(L("CBR AI learns from recorded player behaviour and imitates it. Record examples, replay them as an AI, or use instant learning in a mirror match."));
+ 			if (IsCbrRuntimeHooksInstalled())
+ 				Hint(L("CBR runtime input hooks are active for this session."));
+@@ -170,17 +179,22 @@ namespace MainMenu
+ 			if (ImGui::IsItemHovered())
+ 				ImGui::SetTooltip("Browse, filter, upload, download, and delete CBR data. Slot-specific load and merge buttons are available from each player column below.");
+ 
+-			bool settingsChanged = false;
+-			settingsChanged |= ImGui::Checkbox("Auto record myself", &cbr.autoRecordGameOwner);
+-			settingsChanged |= ImGui::Checkbox("Auto record opponents", &cbr.autoRecordAllOtherPlayers);
+-			settingsChanged |= ImGui::Checkbox("Auto upload own data", &cbr.autoUploadOwnData);
+-			settingsChanged |= ImGui::Checkbox("Auto save in lobby", &cbr.autoRecordConfirmation);
+-			if (settingsChanged)
+-				cbr.saveSettings();
+-
+-			if (!inTraining)
++			if (!supportedMatch)
+ 			{
+-				Unavailable(L("Enter training mode to use the live CBR controls below."));
++				bool settingsChanged = false;
++				settingsChanged |= ImGui::Checkbox("Auto record myself", &cbr.autoRecordGameOwner);
++				settingsChanged |= ImGui::Checkbox("Auto record opponents", &cbr.autoRecordAllOtherPlayers);
++				settingsChanged |= ImGui::Checkbox("Auto upload own data", &cbr.autoUploadOwnData);
++				settingsChanged |= ImGui::Checkbox("Auto save in lobby", &cbr.autoRecordConfirmation);
++				if (settingsChanged)
++					cbr.saveSettings();
++
++				ImGui::SeparatorText("Versus player names");
++				ImGui::InputText("Player 1 name##CBRVersusP1", cbr.nameVersusP1, IM_ARRAYSIZE(cbr.nameVersusP1));
++				ImGui::InputText("Player 2 name##CBRVersusP2", cbr.nameVersusP2, IM_ARRAYSIZE(cbr.nameVersusP2));
++				Hint(L("These names are used when automatic CBR recording starts in local Versus mode."));
++
++				Unavailable(L("Live CBR controls are available in Training, Versus, and Online matches."));
+ 				return;
+ 			}
+ 
+@@ -210,11 +225,11 @@ namespace MainMenu
+ 			{
+ 				ImGui::TableNextColumn();
+ 				ImGui::SeparatorText("Player 1 / Slot 1");
+-				DrawCbrPlayerControls(0, mirrorMatch, container);
++				DrawCbrPlayerControls(0, mirrorMatch, !inVersus, container);
+ 
+ 				ImGui::TableNextColumn();
+ 				ImGui::SeparatorText("Player 2 / Slot 2");
+-				DrawCbrPlayerControls(1, mirrorMatch, container);
++				DrawCbrPlayerControls(1, mirrorMatch, !inVersus, container);
+ 				ImGui::EndTable();
+ 			}
+ 
+@@ -223,20 +238,23 @@ namespace MainMenu
+ 			if (ImGui::Button("Stop all CBR activity"))
+ 				cbr.EndCbrActivities();
+ 
+-			ImGui::SameLine();
+-			if (ImGui::Button("Replay both"))
++			if (!inVersus)
+ 			{
+-				CbrData* p1 = cbr.getCbrData(0);
+-				CbrData* p2 = cbr.getCbrData(1);
+-				if (p1 && p2 && p1->getReplayCount() > 0 && p2->getReplayCount() > 0 && !cbr.Replaying && !cbr.ReplayingP2)
+-				{
+-					cbr.EndCbrActivities();
+-					cbr.Replaying = true;
+-					cbr.ReplayingP2 = true;
+-				}
+-				else
++				ImGui::SameLine();
++				if (ImGui::Button("Replay both"))
+ 				{
+-					cbr.EndCbrActivities();
++					CbrData* p1 = cbr.getCbrData(0);
++					CbrData* p2 = cbr.getCbrData(1);
++					if (p1 && p2 && p1->getReplayCount() > 0 && p2->getReplayCount() > 0 && !cbr.Replaying && !cbr.ReplayingP2)
++					{
++						cbr.EndCbrActivities();
++						cbr.Replaying = true;
++						cbr.ReplayingP2 = true;
++					}
++					else
++					{
++						cbr.EndCbrActivities();
++					}
+ 				}
+ 			}
+ 
+@@ -268,6 +286,6 @@ namespace MainMenu
+ 		const bool inTraining = g_gameVals.pGameMode && *g_gameVals.pGameMode == GameMode_Training;
+ 		if (!inTraining)
+ 		{
+-			Hint(L("Everything on this page needs training mode. It is all listed anyway so you know what is waiting for you there."));
++			Hint(L("Most tools on this page need training mode. CBR AI also supports Versus and Online matches."));
+ 			ImGui::VerticalSpacing(6);
+ 		}
+@@ -303,7 +321,7 @@ namespace MainMenu
+ 		scr->DrawWakeupBody();
+ 
+ 		ImGui::VerticalSpacing(8);
+-		if (BeginSection(Training_CbrAi, inTraining))
+-			DrawCbrSection(inTraining, ctx.container);
++		if (BeginSection(Training_CbrAi, true))
++			DrawCbrSection(ctx.container);
+ 
+ 		ImGui::VerticalSpacing(8);
