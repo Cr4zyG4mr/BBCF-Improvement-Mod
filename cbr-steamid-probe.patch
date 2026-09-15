@@ -1,0 +1,81 @@
+diff --git a/src/SteamApiWrapper/SteamUserWrapper.cpp b/src/SteamApiWrapper/SteamUserWrapper.cpp
+--- a/src/SteamApiWrapper/SteamUserWrapper.cpp
++++ b/src/SteamApiWrapper/SteamUserWrapper.cpp
+@@ -33,5 +33,13 @@
+ CSteamID SteamUserWrapper::GetSteamID()
+ {
+ 	LOG(7, "GetSteamID\n");
+-	return m_SteamUser->GetSteamID();
++	const CSteamID steamId = m_SteamUser->GetSteamID();
++	static unsigned long long lastLoggedSteamId = 0;
++	const unsigned long long steamId64 = static_cast<unsigned long long>(steamId.ConvertToUint64());
++	if (steamId64 != 0 && steamId64 != lastLoggedSteamId)
++	{
++		lastLoggedSteamId = steamId64;
++		ForceLog("[CBR-ID-PROBE] local GetSteamID=%llu", static_cast<unsigned long long>(steamId64));
++	}
++	return steamId;
+ }
+diff --git a/src/SteamApiWrapper/SteamNetworkingWrapper.cpp b/src/SteamApiWrapper/SteamNetworkingWrapper.cpp
+--- a/src/SteamApiWrapper/SteamNetworkingWrapper.cpp
++++ b/src/SteamApiWrapper/SteamNetworkingWrapper.cpp
+@@ -43,10 +43,22 @@
+ { 
+ 	LOG(7, "SteamNetworkingWrapper ReadP2PPacket\n");
+ 
+ 	bool ret = m_SteamNetworking->ReadP2PPacket(pubDest, cubDest, pcubMsgSize, psteamIDRemote, nChannel);
+ 
++	if (ret && psteamIDRemote)
++	{
++		const unsigned long long steamId64 = static_cast<unsigned long long>(psteamIDRemote->ConvertToUint64());
++		static unsigned long long lastLoggedRemote = 0;
++		if (steamId64 != 0 && steamId64 != lastLoggedRemote)
++		{
++			lastLoggedRemote = steamId64;
++			ForceLog("[CBR-ID-PROBE] ReadP2PPacket remote=%llu channel=%d",
++				static_cast<unsigned long long>(steamId64), nChannel);
++		}
++	}
++
+ 	// Log incoming data:
+ 	// LOG(2, "\t- %s\n", RawMemoryArrayToString((unsigned char*)pubDest, *pcubMsgSize));
+ 
+ 	return ret;
+ }
+@@ -55,5 +55,7 @@
+ bool SteamNetworkingWrapper::AcceptP2PSessionWithUser(CSteamID steamIDRemote)
+ {
+-	LOG(7, "SteamNetworkingWrapper AcceptP2PSessionWithUser\n"); 
++	LOG(7, "SteamNetworkingWrapper AcceptP2PSessionWithUser\n");
++	ForceLog("[CBR-ID-PROBE] AcceptP2PSessionWithUser remote=%llu",
++		static_cast<unsigned long long>(steamIDRemote.ConvertToUint64()));
+ 	return m_SteamNetworking->AcceptP2PSessionWithUser(steamIDRemote);
+ }
+@@ -85,5 +85,7 @@
+ SNetSocket_t SteamNetworkingWrapper::CreateP2PConnectionSocket(CSteamID steamIDTarget, int nVirtualPort, int nTimeoutSec, bool bAllowUseOfPacketRelay)
+ {
+ 	LOG(2, "SteamNetworkingWrapper CreateP2PConnectionSocket\n");
++	ForceLog("[CBR-ID-PROBE] CreateP2PConnectionSocket remote=%llu port=%d",
++		static_cast<unsigned long long>(steamIDTarget.ConvertToUint64()), nVirtualPort);
+ 	return m_SteamNetworking->CreateP2PConnectionSocket(steamIDTarget, nVirtualPort, nTimeoutSec, bAllowUseOfPacketRelay);
+ }
+diff --git a/src/SteamApiWrapper/SteamFriendsWrapper.cpp b/src/SteamApiWrapper/SteamFriendsWrapper.cpp
+--- a/src/SteamApiWrapper/SteamFriendsWrapper.cpp
++++ b/src/SteamApiWrapper/SteamFriendsWrapper.cpp
+@@ -198,5 +198,8 @@
+ void SteamFriendsWrapper::ActivateGameOverlayToUser(const char *pchDialog, CSteamID steamID)
+ {
+ 	LOG(7, "ActivateGameOverlayToUser\n");
++	ForceLog("[CBR-ID-PROBE] ActivateGameOverlayToUser dialog='%s' steamid=%llu",
++		pchDialog ? pchDialog : "<null>",
++		static_cast<unsigned long long>(steamID.ConvertToUint64()));
+ 	return m_SteamFriends->ActivateGameOverlayToUser(pchDialog, steamID);
+ }
+@@ -217,5 +217,7 @@
+ void SteamFriendsWrapper::SetPlayedWith(CSteamID steamIDUserPlayedWith)
+ {
+ 	LOG(2, "SetPlayedWith\n");
++	ForceLog("[CBR-ID-PROBE] SetPlayedWith remote=%llu",
++		static_cast<unsigned long long>(steamIDUserPlayedWith.ConvertToUint64()));
+ 	return m_SteamFriends->SetPlayedWith(steamIDUserPlayedWith);
+ }
