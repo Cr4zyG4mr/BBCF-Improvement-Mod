@@ -51,6 +51,7 @@ namespace MainMenu
 		Training_Slots,
 		Training_SaveStates,
 		Training_Wakeup,
+		Training_CbrAi,
 		Training_Tas,
 
 		Overlays_Hitboxes,
