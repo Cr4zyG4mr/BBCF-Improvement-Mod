@@ -60,7 +60,8 @@ jobs:
         with:
           name: BBCF-Improvement-Mod-HaiKam-CBR
           path: |
-            bin/Release/dinput8.dll
-            bin/Release/BBCFIMUpdater.exe
-            bin/Release/dinput8.pdb
+            bin/Release/BBCF.IM.win-x86.*.zip
+            bin/Release/update-manifest.json
+            build/symbols/**/Release/dinput8.dll
+            build/symbols/**/Release/dinput8.pdb
           if-no-files-found: warn
