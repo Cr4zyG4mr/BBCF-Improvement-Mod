@@ -50,7 +50,23 @@ Copy-Item (Join-Path $repoRoot "USER_README.txt") (Join-Path $stage "USER_README
 
 Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zipPath -Force
-$sha = (Get-FileHash -Algorithm SHA256 $zipPath).Hash.ToLowerInvariant()
+
+# Get-FileHash is unavailable in some stripped-down Windows build environments.
+# Hash directly through .NET so packaging works under both Windows PowerShell and pwsh.
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $stream = [System.IO.File]::OpenRead($zipPath)
+    try {
+        $hashBytes = $sha256.ComputeHash($stream)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+finally {
+    $sha256.Dispose()
+}
+$sha = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "").ToLowerInvariant()
 $size = (Get-Item $zipPath).Length
 
 $manifest = [ordered]@{
