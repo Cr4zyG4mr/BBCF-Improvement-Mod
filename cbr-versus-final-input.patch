@@ -1,0 +1,112 @@
+diff --git a/src/Hooks/hooks_battle_input.cpp b/src/Hooks/hooks_battle_input.cpp
+--- a/src/Hooks/hooks_battle_input.cpp
++++ b/src/Hooks/hooks_battle_input.cpp
+@@ -77,3 +77,11 @@ namespace
+         g_lastObservedPacked[normalizedPlayer] = packedInput;
++        if (g_gameVals.pGameMode && *g_gameVals.pGameMode == GameMode_Versus)
++        {
++            if (normalizedPlayer == 0)
++                g_interfaces.cbrInterface.input = packedInput;
++            else
++                g_interfaces.cbrInterface.inputP2 = packedInput;
++        }
++
+         if (g_gameVals.pGameMode && *g_gameVals.pGameMode == GameMode_Training)
+         {
+@@ -124,4 +132,4 @@ namespace
+ 
+         OverrideState& overrideState = g_overrideState[normalizedPlayer];
+-        if (overrideState.active)
++        if (IsControllerHooksRuntimeAllowed() && overrideState.active)
+         {
+@@ -343,7 +351,4 @@ bool Hook_BattleInput()
+ {
+-    if (!IsControllerHooksRuntimeAllowed()) {
+-        LOG(1, "Hook_BattleInput skipped by runtime controller gate\n");
+-        return false;
+-    }
+-
++    // Keep this hook active as a read-only final-input observer on Wine/Proton.
++    // Input mutation remains gated inside ProcessBattleInput.
+     // The 5 bytes we take over are the call at the tail of the two-player input loop
+diff --git a/src/Core/dllmain.cpp b/src/Core/dllmain.cpp
+--- a/src/Core/dllmain.cpp
++++ b/src/Core/dllmain.cpp
+@@ -310,10 +310,12 @@ DWORD WINAPI BBCF_IM_Start(HMODULE hModule)
+ 
+ 	ForceLog("[Init] Detours hooks placed OK");
+-	// Install battle input hook (P1/P2 input write site)
+-	if (IsControllerHooksRuntimeAllowed() && !Hook_BattleInput())
++	// Always install the common final battle-input observer. On Wine/Proton the
++	// hook remains read-only because ProcessBattleInput still gates input mutation.
++	// CBR needs the finished packed value for COM players and for either P1/P2 slot.
++	if (!Hook_BattleInput())
+ 	{
+ 	// For now, don't hard-fail the entire mod - just log it.
+ 	// If you prefer, you can pop a MessageBox+ExitProcess instead.
+-	LOG(2, "BBCF_IM_Start: Hook_BattleInput failed; P2 input PoC disabled.\n");
+-	ForceLog("[Init] Hook_BattleInput failed; continuing without P2 input hook.\n");
++	LOG(2, "BBCF_IM_Start: Hook_BattleInput failed; final input observation disabled.\n");
++	ForceLog("[Init] Hook_BattleInput failed; continuing without final input observation.\n");
+ }
+diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
+--- a/src/Hooks/hooks_cbr_runtime.cpp
++++ b/src/Hooks/hooks_cbr_runtime.cpp
+@@ -1,5 +1,6 @@
+ #include "hooks_cbr_runtime.h"
+ 
+ #include "hooks_cbr.h"
++#include "hooks_battle_input.h"
+ #include "HookManager.h"
+ 
+@@ -200,4 +201,13 @@ bool EnsureCbrRuntimeHooksInstalled()
+     g_installAttempted = true;
+     LOG(1, "[CBR] Installing runtime input hooks.\n");
+ 
++    // Versus auto-recording reads the game's final packed input, after either
++    // human input or COM AI has produced it. This shared observer covers P1 and
++    // P2, so the local user can occupy either side without changing CBR logic.
++    if (!IsBattleInputHookInstalled())
++    {
++        LOG(0, "[CBR] Final battle input hook is unavailable; live CBR disabled.\n");
++        return false;
++    }
++
+     g_p1InputJmpBack = HookManager::SetHook(
+diff --git a/src/Hooks/hooks_cbr.cpp b/src/Hooks/hooks_cbr.cpp
+--- a/src/Hooks/hooks_cbr.cpp
++++ b/src/Hooks/hooks_cbr.cpp
+@@ -1,3 +1,4 @@
+ #include "hooks_cbr.h"
++#include "hooks_battle_input.h"
+ 
+ #include "HookManager.h"
+@@ -299,3 +300,10 @@ int CBRLogic(int input, int playerNr, int controllerNr, bool readOnly, bool write
+ int CBRLogic(int input, int playerNr, int controllerNr, bool readOnly, bool writeOnly, bool netplayMemory) {
+ 	static std::array<int, 2> oldInput{ 5,5 };
++	const bool useVersusFinalInput =
++		g_interfaces.cbrInterface.autoRecordActive &&
++		g_gameVals.pGameMode != nullptr &&
++		*g_gameVals.pGameMode == GameMode_Versus;
++	const int recordedInput = useVersusFinalInput
++		? static_cast<int>(GetLastObservedBattleInputPacked(static_cast<uint32_t>(playerNr)))
++		: input;
+ 	g_interfaces.cbrInterface.debugNr = playerNr;
+@@ -323,3 +331,3 @@ int CBRLogic(int input, int playerNr, int controllerNr, bool readOnly, bool write
+-				if (input != 0 && meta != nullptr) {
+-					g_interfaces.cbrInterface.getAnnotatedReplay(0)->AddFrame(meta, input);
++				if (recordedInput != 0 && meta != nullptr) {
++					g_interfaces.cbrInterface.getAnnotatedReplay(0)->AddFrame(meta, recordedInput);
+ 				}
+@@ -365,3 +373,3 @@ int CBRLogic(int input, int playerNr, int controllerNr, bool readOnly, bool write
+-				if (input != 0 && meta != nullptr) {
+-					g_interfaces.cbrInterface.getAnnotatedReplay(1)->AddFrame(meta, input);
++				if (recordedInput != 0 && meta != nullptr) {
++					g_interfaces.cbrInterface.getAnnotatedReplay(1)->AddFrame(meta, recordedInput);
+ 				}
+@@ -377,4 +385,4 @@ int CBRLogic(int input, int playerNr, int controllerNr, bool readOnly, bool write
+ 	}
+ 	if (writeOnly || readOnly) {
+-		oldInput[playerNr] = input;
++		oldInput[playerNr] = recordedInput;
+ 	}
