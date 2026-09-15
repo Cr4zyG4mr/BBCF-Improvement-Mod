@@ -1,0 +1,78 @@
+diff --git a/src/CBR/CbrInterface.h b/src/CBR/CbrInterface.h
+--- a/src/CBR/CbrInterface.h
++++ b/src/CBR/CbrInterface.h
+@@ -122,8 +122,8 @@ public:
+ 	bool firstInputParser = false;
+ 	int debugReplayNr = 0;
+ 	std::deque<char> inputs;
+-	int input;
+-	int inputP2;
++	int input = 5;
++	int inputP2 = 5;
+ 	std::array<int, 2> debugErrorCounter = { 0,0 };
+ 	int pMatchState = 0;
+ 	int debugNr = -1;
+@@ -149,9 +149,9 @@ public:
+ 	void CbrInterface::SaveWeights(costWeights cst);
+ 	costWeights CbrInterface::LoadWeights(std::string in);
+ 
+-	bool reversalRecording;
+-	bool reversalRecordingActive;
+-	bool reversalActive;
++	bool reversalRecording = false;
++	bool reversalRecordingActive = false;
++	bool reversalActive = false;
+ 	int reversalReplayNr = 0;
+ 	bool blockStanding = false;
+ 	bool blockCrouching = false;
+@@ -179,8 +179,8 @@ public:
+ 	void CbrInterface::UpdateOldCbrMetadata();
+ 
+ 	void CbrInterface::Checkinputs();
+-	int debugPrint1;
+-	int debugPrint2;
+-	int debugPrint3;
+-	int debugPrint4;
++	int debugPrint1 = 0;
++	int debugPrint2 = 0;
++	int debugPrint3 = 0;
++	int debugPrint4 = 0;
+ 	HANDLE hProcess = 0;
+ 	uintptr_t moduleBase = 0;
+ 	uintptr_t input5Ptr = 0;
+diff --git a/src/Overlay/Window/MainMenu/PageTraining.cpp b/src/Overlay/Window/MainMenu/PageTraining.cpp
+--- a/src/Overlay/Window/MainMenu/PageTraining.cpp
++++ b/src/Overlay/Window/MainMenu/PageTraining.cpp
+@@ -5,6 +5,7 @@
+ #include "Core/Localization.h"
+ #include "Core/utils.h"
+ #include "Game/gamestates.h"
++#include "Hooks/hooks_cbr_runtime.h"
+ #include "Overlay/imgui_utils.h"
+ #include "Overlay/WindowContainer/WindowContainer.h"
+ #include "Overlay/Window/ScrWindow.h"
+@@ -162,7 +163,10 @@ namespace MainMenu
+ 			cbr.loadSettings(&cbr);
+ 
+ 			Hint(L("CBR AI learns from recorded player behaviour and imitates it. Record examples, replay them as an AI, or use instant learning in a mirror match."));
+-			Hint(L("The menu is wired first. The CBR runtime input hooks are still being ported into the HaiKamDesu base, so these controls will not affect gameplay until that runtime wiring is finished."));
++			if (IsCbrRuntimeHooksInstalled())
++				Hint(L("CBR runtime input hooks are active for this session."));
++			else
++				Hint(L("CBR runtime input hooks failed to install. Data management remains available, but live CBR controls are disabled."));
+ 
+ 			if (ImGui::Button("CBR data manager..."))
+ 				OpenCbrDataManager(container, -1);
+@@ -184,6 +188,12 @@ namespace MainMenu
+ 				return;
+ 			}
+ 
++			if (!IsCbrRuntimeHooksInstalled())
++			{
++				Unavailable(L("CBR input hooks are unavailable in this session. Check DEBUG.txt for the failed signature."));
++				return;
++			}
++
+ 			if (cbr.threadActiveCheck())
+ 			{
+ 				Unavailable(L("CBR data is currently being saved or loaded. Please wait."));

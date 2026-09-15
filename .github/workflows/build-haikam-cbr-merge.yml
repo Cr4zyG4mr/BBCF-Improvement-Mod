@@ -25,6 +25,22 @@ jobs:
           git apply --verbose cbr-modern-compat.patch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Apply CBR runtime safety patch
+        shell: pwsh
+        run: |
+          git apply --check cbr-runtime-safety.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git apply --verbose cbr-runtime-safety.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Apply replay deletion safety patch
+        shell: pwsh
+        run: |
+          git apply --check cbr-replay-delete-safety.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git apply --verbose cbr-replay-delete-safety.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
         with:

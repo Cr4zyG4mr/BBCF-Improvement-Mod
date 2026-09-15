@@ -1,0 +1,56 @@
+diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
+--- a/src/CBR/CbrData.cpp
++++ b/src/CBR/CbrData.cpp
+@@ -78,8 +78,23 @@ void CbrData::deleteReplays(int start, int end) {
+     if (end < 0) { return; }
+     if (start >= replayFiles.size()) { return; }
+     if (end >= replayFiles.size()) { end = replayFiles.size() - 1; }
+-    for (int i = end; i >= start; i--) {
+-        Searchtree.deleteReplay(i,replayFiles);
++
++    const int eraseStart = std::max(start, 0);
++    const int eraseEnd = std::min(end + 1, static_cast<int>(replayFiles.size()));
++    replayFiles.erase(std::next(replayFiles.begin(), eraseStart), std::next(replayFiles.begin(), eraseEnd));
++
++    // The search tree stores positional indexes into replayFiles. Rebuilding it
++    // after deletion avoids stale node/replay indexes left by in-place tree surgery.
++    Searchtree = CbrSearchTree();
++    if (!replayFiles.empty()) {
++        Searchtree.generateTreeFromOldReplay(replayFiles, costs, curCosts);
+     }
+-    replayFiles.erase(std::next(replayFiles.begin(), std::max(start,0)), std::next(replayFiles.begin(), std::min(end+1, (int)replayFiles.size())));
++    else {
++        resetCbr();
++        resetInstantLearning();
++        activeInstantLearn = false;
++        caseSelector = {};
++        framesActive = 0;
++        enabled = false;
++    }
+ }
+@@ -116,4 +131,8 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
+     CbrReplayFile* replay = &instantLearnReplay;
+-    if (activeReplay != -1 && !activeInstantLearn && replayFiles.size() >= 1) {
+-         replay = &replayFiles[activeReplay];
++    if (activeReplay != -1 && !activeInstantLearn) {
++        if (activeReplay < 0 || activeReplay >= static_cast<int>(replayFiles.size())) {
++            resetCbr();
++            return 5;
++        }
++        replay = &replayFiles[activeReplay];
+     }
+@@ -190,6 +209,14 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
+         if (bestReplay != -1) {
+             if (!selectedCase.instantLearn) {
++                if (selectedCase.replayIndex < 0 || selectedCase.replayIndex >= static_cast<int>(replayFiles.size())) {
++                    resetCbr();
++                    return 5;
++                }
+                 bestReplayFile = &replayFiles[selectedCase.replayIndex];
++            }
++            if (selectedCase.caseIndex < 0 || selectedCase.caseIndex >= bestReplayFile->getCaseBaseLength()) {
++                resetCbr();
++                return 5;
+             }
+             bestFrame = bestReplayFile->getCase(selectedCase.caseIndex)->getStartingIndex();
+         }
