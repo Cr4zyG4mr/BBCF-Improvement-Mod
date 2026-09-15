@@ -29,7 +29,8 @@ jobs:
             "cbr-menu-mode-parity.patch",
             "cbr-auto-save-lifecycle.patch",
             "cbr-versus-final-input.patch",
-            "cbr-steamid-probe.patch"
+            "cbr-steamid-probe.patch",
+            "cbr-online-runtime-safety.patch"
           )
 
           foreach ($patch in $patches) {

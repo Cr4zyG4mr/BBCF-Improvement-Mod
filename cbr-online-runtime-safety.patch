@@ -1,0 +1,105 @@
+diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
+--- a/src/Hooks/hooks_cbr_runtime.cpp
++++ b/src/Hooks/hooks_cbr_runtime.cpp
+@@ -11,6 +11,7 @@ namespace
+ {
+     DWORD g_p1InputJmpBack = 0;
+     DWORD g_p2InputJmpBack = 0;
++    DWORD g_p2InputOriginalTarget = 0;
+     DWORD g_p1OverwriteNetplayJmpBack = 0;
+     DWORD g_p2ReadNetplayJmpBack = 0;
+ 
+@@ -18,9 +19,14 @@ namespace
+ 
+     bool IsCbrRuntimeStateReady()
+     {
+-        if (g_gameVals.pGameMode == nullptr || g_gameVals.pMatchState == nullptr)
++        if (g_gameVals.pGameMode == nullptr ||
++            g_gameVals.pGameState == nullptr ||
++            g_gameVals.pMatchState == nullptr)
+             return false;
+ 
++        if (*g_gameVals.pGameState != GameState_InMatch)
++            return false;
++
+         const int gameMode = *g_gameVals.pGameMode;
+         if (gameMode != GameMode_Training &&
+             gameMode != GameMode_Versus &&
+@@ -79,6 +85,7 @@ namespace
+     {
+         static char* addr = nullptr;
+         static int playerNr = -1;
++        static bool cbrReady = false;
+ 
+         __asm
+         {
+@@ -91,13 +98,20 @@ namespace
+             pushad
+         }
+ 
+-        if (IsCbrRuntimeStateReady())
++        cbrReady = IsCbrRuntimeStateReady();
++        if (cbrReady)
+             CBRLogic(addr, 4, true, true, playerNr);
+ 
+         __asm
+         {
+             popad
+             popfd
++
++            cmp cbrReady, 0
++            jne cbrP2InputActive
++            jmp [g_p2InputOriginalTarget]
++
++        cbrP2InputActive:
+             jmp [g_p2InputJmpBack]
+         }
+     }
+@@ -167,6 +181,7 @@ namespace
+             HookManager::DeactivateHook("CBRRuntime.P1Input");
+ 
+         g_p1InputJmpBack = 0;
++        g_p2InputOriginalTarget = 0;
+         g_p2InputJmpBack = 0;
+         g_p1OverwriteNetplayJmpBack = 0;
+         g_p2ReadNetplayJmpBack = 0;
+@@ -212,11 +227,26 @@ bool EnsureCbrRuntimeHooksInstalled()
+         return false;
+     }
+ 
+-    g_p2InputJmpBack = HookManager::SetHook(
+-        "CBRRuntime.P2Input",
++    const DWORD p2InputSite = HookManager::RegisterHook(
++        "CBRRuntime.P2InputSite",
+         "\xE9\x00\x00\x00\x00\xE8\x00\x00\x00\x00\x8B\xC8\xE8\x00\x00\x00\x00\x85\xC0\x75\x00\xE8\x00\x00\x00\x00\x8B\xC8\xE8\x00\x00\x00\x00\x85\xC0\x75\x00\xE8\x00\x00\x00\x00\x8B\xC8\xE8\x00\x00\x00\x00\x53",
+         "x????x????xxx????xxx?x????xxx????xxx?x????xxx????x",
+-        5,
++        5);
++    if (p2InputSite == 0)
++    {
++        LOG(0, "[CBR] Failed to locate P2 input branch site.\n");
++        RollBackInstalledHooks();
++        return false;
++    }
++
++    const LONG p2BranchDisplacement =
++        *reinterpret_cast<const LONG*>(p2InputSite + 1);
++    g_p2InputOriginalTarget = p2InputSite + 5 + p2BranchDisplacement;
++
++    g_p2InputJmpBack = HookManager::SetHook(
++        "CBRRuntime.P2Input",
++        p2InputSite,
++        5,
+         CbrP2InputHook);
+     if (g_p2InputJmpBack == 0)
+     {
+@@ -225,6 +254,9 @@ bool EnsureCbrRuntimeHooksInstalled()
+         return false;
+     }
+ 
++    LOG(1, "[CBR] P2 input branch original target: 0x%08X.\n",
++        static_cast<unsigned int>(g_p2InputOriginalTarget));
++
+     // The legacy P1InputNetplay hook did not run CBR logic at all and its original
+     // implementation even jumped through the wrong continuation address. Leaving
+     // that game code untouched is safer than installing a no-op interception.
