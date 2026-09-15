@@ -59,7 +59,22 @@ diff --git a/src/CBR/CbrSearchTree.h b/src/CBR/CbrSearchTree.h
 diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
 --- a/src/CBR/CbrData.cpp
 +++ b/src/CBR/CbrData.cpp
-@@ -116,8 +116,12 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
+@@ -84,5 +84,14 @@ void CbrData::deleteReplays(int start, int end) {
+     for (int i = end; i >= start; i--) {
+         Searchtree.deleteReplay(i,replayFiles);
+     }
+     replayFiles.erase(std::next(replayFiles.begin(), std::max(start,0)), std::next(replayFiles.begin(), std::min(end+1, (int)replayFiles.size())));
++    if (replayFiles.empty()) {
++        Searchtree = CbrSearchTree();
++        resetCbr();
++        resetInstantLearning();
++        activeInstantLearn = false;
++        caseSelector = {};
++        framesActive = 0;
++        enabled = false;
++    }
+ }
+@@ -116,8 +125,12 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
  
  
      CbrReplayFile* replay = &instantLearnReplay;
@@ -74,7 +89,7 @@ diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
      }
  
      //If the AI misses an attack that was meant to hit we wait untill the attack is done whiffing or untill it hits the opponent to search for the next case
-@@ -190,7 +194,15 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
+@@ -190,7 +203,15 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
          bool nextInstantLearnSameReplay = true;
          if (bestReplay != -1) {
              if (!selectedCase.instantLearn) {
