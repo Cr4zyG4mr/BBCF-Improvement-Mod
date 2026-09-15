@@ -1,0 +1,57 @@
+name: Build HaiKam CBR integration
+
+on:
+  push:
+    branches:
+      - haikam-cbr-merge
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x86
+
+      - name: Install CBR native dependencies
+        shell: pwsh
+        run: |
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            throw "VCPKG_INSTALLATION_ROOT is not defined on this runner"
+          }
+          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
+          & $vcpkg install `
+            boost-algorithm:x86-windows-static `
+            boost-beast:x86-windows-static `
+            boost-filesystem:x86-windows-static `
+            boost-iostreams:x86-windows-static `
+            boost-serialization:x86-windows-static `
+            boost-thread:x86-windows-static `
+            boost-ublas:x86-windows-static `
+            openssl:x86-windows-static
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $vcpkg integrate install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Release Win32
+        shell: pwsh
+        run: |
+          $env:LINK = "/DEFAULTLIB:libssl.lib /DEFAULTLIB:libcrypto.lib $env:LINK"
+          msbuild BBCF_IM.sln /m /p:Configuration=Release /p:Platform=Win32 /p:VcpkgEnabled=true /p:VcpkgTriplet=x86-windows-static
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload integration build
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BBCF-Improvement-Mod-HaiKam-CBR
+          path: |
+            bin/Release/dinput8.dll
+            bin/Release/BBCFIMUpdater.exe
+          if-no-files-found: warn
