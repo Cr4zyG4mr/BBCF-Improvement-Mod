@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'BBCF_IM'">
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\AnnotatedReplay.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrCase.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrData.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrInterface.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrReplayFile.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrSearchTree.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CharacterStorage.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\Helper.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\Metadata.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)src\Hooks\hooks_cbr.cpp" />
+  </ItemGroup>
+</Project>
