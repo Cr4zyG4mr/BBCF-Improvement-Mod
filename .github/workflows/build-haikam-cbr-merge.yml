@@ -20,15 +20,21 @@ jobs:
       - name: Apply CBR compatibility patches
         shell: pwsh
         run: |
-          git apply --check cbr-modern-compat.patch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git apply --verbose cbr-modern-compat.patch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patches = @(
+            "cbr-modern-compat.patch",
+            "cbr-runtime-safety.patch",
+            "cbr-replay-delete-safety.patch",
+            "cbr-data-manager-json-fix.patch",
+            "cbr-match-lifecycle.patch"
+          )
 
-          git apply --check cbr-data-manager-json-fix.patch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git apply --verbose cbr-data-manager-json-fix.patch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($patch in $patches) {
+            Write-Host "Applying $patch"
+            git apply --check $patch
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            git apply --verbose $patch
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2

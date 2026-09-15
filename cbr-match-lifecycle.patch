@@ -1,0 +1,88 @@
+diff --git a/src/Game/MatchState.cpp b/src/Game/MatchState.cpp
+--- a/src/Game/MatchState.cpp
++++ b/src/Game/MatchState.cpp
+@@ -82,3 +82,22 @@ void MatchState::OnMatchInit()
+ 	GetMusicManager().OnMatchInit();
+ 
++	// The legacy CBR subsystem starts automatic Versus/Online recording from the
++	// match lifecycle. Keep it behind the same readiness checks used by the live
++	// input hooks so entering a match cannot feed it half-constructed CharData.
++	if (g_gameVals.pGameMode != nullptr &&
++		!g_interfaces.player1.IsCharDataNullPtr() &&
++		!g_interfaces.player2.IsCharDataNullPtr())
++	{
++		const int gameMode = *g_gameVals.pGameMode;
++		if (gameMode == GameMode_Training ||
++			gameMode == GameMode_Versus ||
++			gameMode == GameMode_Online)
++		{
++			g_interfaces.cbrInterface.OnMatchInit(
++				*g_interfaces.player1.GetData(),
++				*g_interfaces.player2.GetData(),
++				gameMode);
++		}
++	}
++
+ 	const bool paletteManagerReady = ManagerReady(
+diff --git a/src/CBR/CbrInterface.cpp b/src/CBR/CbrInterface.cpp
+--- a/src/CBR/CbrInterface.cpp
++++ b/src/CBR/CbrInterface.cpp
+@@ -1564,16 +1564,17 @@ std::string CbrInterface::GetPlayerID() {
+ 	try
+ 	{
+-		//Get ProcId of the target process
+-		DWORD procId = GetProcId(L"BBCF.exe");
+-		//Getmodulebaseaddress
+-		uintptr_t moduleBase = GetModuleBaseAddress(procId, L"BBCF.exe");
++		// We are already running inside BBCF.exe. Avoid Toolhelp snapshots and
++		// PROCESS_ALL_ACCESS on our own process; those are unnecessary and are
++		// more fragile under Wine/Proton.
++		uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
++		if (moduleBase == 0) { return ""; }
+ 		uintptr_t p1NamePtr = moduleBase + 0x662740;
+-		HANDLE hProcess = 0;
+-		hProcess = OpenProcess(PROCESS_ALL_ACCESS, NULL, procId);
+ 
+ 		char playerID[35]{ 0 };
+-
+-		ReadProcessMemory(hProcess, (BYTE*)p1NamePtr, &playerID, 34, 0);
++		SIZE_T bytesRead = 0;
++		if (!ReadProcessMemory(GetCurrentProcess(), (BYTE*)p1NamePtr, &playerID, 34, &bytesRead) || bytesRead == 0) {
++			return "";
++		}
+ 		nameP1 = "";
+ 
+ 		for (int i = 0; i < 35; i++) {
+@@ -1608,19 +1609,23 @@ void CbrInterface::SetPlayerNames() {
+ 	try
+ 	{
+-		//Get ProcId of the target process
+-		DWORD procId = GetProcId(L"BBCF.exe");
+-		//Getmodulebaseaddress
+-		uintptr_t moduleBase = GetModuleBaseAddress(procId, L"BBCF.exe");
++		// Read BBCF's own memory directly through the current-process handle.
++		// This avoids PROCESS_ALL_ACCESS / module-snapshot quirks under Wine.
++		uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
++		if (moduleBase == 0) { return; }
+ 		uintptr_t p1NamePtr = moduleBase + 0x115B51C;
+ 		uintptr_t p2NamePtr = moduleBase + 0x115B5E6;
+-		HANDLE hProcess = 0;
+-		hProcess = OpenProcess(PROCESS_ALL_ACCESS, NULL, procId);
+ 
+ 		char p1CharName[35]{ 0 };
+ 		char p2CharName[35]{ 0 };
+-
+-		ReadProcessMemory(hProcess, (BYTE*)p1NamePtr, &p1CharName, 34, 0);
+-		ReadProcessMemory(hProcess, (BYTE*)p2NamePtr, &p2CharName, 34, 0);
++		SIZE_T p1BytesRead = 0;
++		SIZE_T p2BytesRead = 0;
++
++		if (!ReadProcessMemory(GetCurrentProcess(), (BYTE*)p1NamePtr, &p1CharName, 34, &p1BytesRead) ||
++			!ReadProcessMemory(GetCurrentProcess(), (BYTE*)p2NamePtr, &p2CharName, 34, &p2BytesRead) ||
++			p1BytesRead == 0 || p2BytesRead == 0)
++		{
++			return;
++		}
+ 		nameP1 = "";
+ 		nameP2 = "";
+ 
