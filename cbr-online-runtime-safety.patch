@@ -9,7 +9,7 @@ diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
      DWORD g_p1OverwriteNetplayJmpBack = 0;
      DWORD g_p2ReadNetplayJmpBack = 0;
  
-@@ -18,9 +19,14 @@ namespace
+@@ -18,9 +19,18 @@ namespace
  
      bool IsCbrRuntimeStateReady()
      {
@@ -23,9 +23,17 @@ diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
 +            return false;
 +
          const int gameMode = *g_gameVals.pGameMode;
++        // Online enters the in-match scene during the pre-fight synchronization
++        // handshake. Do not run CBR logic there. Besides touching half-initialized
++        // match data, the legacy P2 hook intentionally changes an existing branch.
++        // Keep BBCF's original path intact until actual gameplay has begun.
++        if (gameMode == GameMode_Online && *g_gameVals.pMatchState != MatchState_Fight)
++            return false;
++
          if (gameMode != GameMode_Training &&
              gameMode != GameMode_Versus &&
-@@ -79,6 +85,7 @@ namespace
+             gameMode != GameMode_Online)
+@@ -79,6 +89,7 @@ namespace
      {
          static char* addr = nullptr;
          static int playerNr = -1;
@@ -33,7 +41,7 @@ diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
  
          __asm
          {
-@@ -91,13 +98,20 @@ namespace
+@@ -91,13 +102,20 @@ namespace
              pushad
          }
  
@@ -55,7 +63,7 @@ diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
              jmp [g_p2InputJmpBack]
          }
      }
-@@ -167,6 +181,7 @@ namespace
+@@ -167,6 +185,7 @@ namespace
              HookManager::DeactivateHook("CBRRuntime.P1Input");
  
          g_p1InputJmpBack = 0;
@@ -63,7 +71,7 @@ diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
          g_p2InputJmpBack = 0;
          g_p1OverwriteNetplayJmpBack = 0;
          g_p2ReadNetplayJmpBack = 0;
-@@ -212,11 +227,26 @@ bool EnsureCbrRuntimeHooksInstalled()
+@@ -212,11 +231,26 @@ bool EnsureCbrRuntimeHooksInstalled()
          return false;
      }
  
@@ -93,7 +101,7 @@ diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
          CbrP2InputHook);
      if (g_p2InputJmpBack == 0)
      {
-@@ -225,6 +254,9 @@ bool EnsureCbrRuntimeHooksInstalled()
+@@ -225,6 +259,9 @@ bool EnsureCbrRuntimeHooksInstalled()
          return false;
      }
  
