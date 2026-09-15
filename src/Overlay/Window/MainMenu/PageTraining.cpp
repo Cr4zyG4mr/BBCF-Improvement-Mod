@@ -13,6 +13,204 @@
 
 namespace MainMenu
 {
+	namespace
+	{
+		void DrawCbrPlayerControls(int playerIndex, bool mirrorMatch)
+		{
+			CbrInterface& cbr = g_interfaces.cbrInterface;
+			Player& player = playerIndex == 0 ? g_interfaces.player1 : g_interfaces.player2;
+			Player& opponent = playerIndex == 0 ? g_interfaces.player2 : g_interfaces.player1;
+			CbrData* data = cbr.getCbrData(playerIndex);
+			AnnotatedReplay* annotated = cbr.getAnnotatedReplay(1 - playerIndex);
+
+			if (!data || player.IsCharDataNullPtr() || opponent.IsCharDataNullPtr())
+			{
+				ImGui::TextDisabled("Character data is not ready yet.");
+				return;
+			}
+
+			bool& recording = playerIndex == 0 ? cbr.Recording : cbr.RecordingP2;
+			bool& replaying = playerIndex == 0 ? cbr.Replaying : cbr.ReplayingP2;
+			bool& instantLearning = playerIndex == 0 ? cbr.instantLearning : cbr.instantLearningP2;
+
+			ImGui::PushID(playerIndex);
+			ImGui::Text("Replays: %d", data->getReplayCount());
+			ImGui::Text("Frames recorded: %d", annotated ? annotated->getInputSize() : 0);
+			ImGui::Text("Input: %d", playerIndex == 0 ? cbr.input : cbr.inputP2);
+
+			const char* recordLabel = recording ? "Stop recording" : "Record";
+			if (ImGui::Button(recordLabel, ImVec2(-1.0f, 0.0f)))
+			{
+				if (!recording)
+				{
+					cbr.EndCbrActivities(playerIndex);
+					cbr.StartCbrRecording(
+						player.GetData()->char_abbr,
+						opponent.GetData()->char_abbr,
+						player.GetData()->charIndex,
+						opponent.GetData()->charIndex,
+						playerIndex);
+				}
+				else
+				{
+					cbr.EndCbrActivities(playerIndex, true);
+				}
+			}
+
+			const char* replayLabel = replaying ? "Stop replay" : "Replay AI";
+			if (ImGui::Button(replayLabel, ImVec2(-1.0f, 0.0f)))
+			{
+				if (!replaying && data->getReplayCount() > 0)
+				{
+					cbr.EndCbrActivities(playerIndex);
+					replaying = true;
+				}
+				else
+				{
+					cbr.EndCbrActivities(playerIndex);
+				}
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Let the CBR AI take control using the data stored in this slot.");
+
+			if (mirrorMatch)
+			{
+				const char* instantLabel = instantLearning ? "Stop instant learning" : "Instant learning";
+				if (ImGui::Button(instantLabel, ImVec2(-1.0f, 0.0f)))
+				{
+					if (!instantLearning)
+					{
+						cbr.EndCbrActivities();
+						cbr.StartCbrInstantLearning(
+							player.GetData()->char_abbr,
+							opponent.GetData()->char_abbr,
+							player.GetData()->charIndex,
+							opponent.GetData()->charIndex,
+							playerIndex);
+					}
+					else
+					{
+						cbr.EndCbrActivities();
+					}
+				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Learn from this player in real time while the AI controls the other side. Mirror matches only.");
+			}
+			else
+			{
+				ImGui::TextDisabled("Instant learning needs a mirror match.");
+			}
+
+			if (ImGui::Button("Delete range", ImVec2(-1.0f, 0.0f)))
+			{
+				cbr.EndCbrActivities();
+				data->deleteReplays(cbr.deletionStart, cbr.deletionEnd);
+			}
+			if (ImGui::Button("Delete last", ImVec2(-1.0f, 0.0f)))
+			{
+				cbr.EndCbrActivities();
+				data->deleteLastReplay();
+			}
+
+			if (ImGui::Button("Save", ImVec2(-1.0f, 0.0f)))
+			{
+				cbr.EndCbrActivities();
+				data->setPlayerName(cbr.playerName);
+				data->setCharName(player.GetData()->char_abbr);
+				cbr.SaveCbrDataThreaded(*data, true);
+			}
+			if (ImGui::Button("Load by name", ImVec2(-1.0f, 0.0f)))
+			{
+				cbr.EndCbrActivities();
+				cbr.LoadCbrData(cbr.playerName, player.GetData()->char_abbr, true, playerIndex);
+			}
+
+			ImGui::PopID();
+		}
+
+		void DrawCbrSection(bool inTraining)
+		{
+			CbrInterface& cbr = g_interfaces.cbrInterface;
+			cbr.loadSettings(&cbr);
+
+			Hint(L("CBR AI learns from recorded player behaviour and imitates it. Record examples, replay them as an AI, or use instant learning in a mirror match."));
+			Hint(L("The menu is wired first. The CBR runtime input hooks are still being ported into the HaiKamDesu base, so these controls will not affect gameplay until that runtime wiring is finished."));
+
+			bool settingsChanged = false;
+			settingsChanged |= ImGui::Checkbox("Auto record myself", &cbr.autoRecordGameOwner);
+			settingsChanged |= ImGui::Checkbox("Auto record opponents", &cbr.autoRecordAllOtherPlayers);
+			settingsChanged |= ImGui::Checkbox("Auto upload own data", &cbr.autoUploadOwnData);
+			settingsChanged |= ImGui::Checkbox("Auto save in lobby", &cbr.autoRecordConfirmation);
+			if (settingsChanged)
+				cbr.saveSettings();
+
+			if (!inTraining)
+			{
+				Unavailable(L("Enter training mode to use the live CBR controls below."));
+				return;
+			}
+
+			if (cbr.threadActiveCheck())
+			{
+				Unavailable(L("CBR data is currently being saved or loaded. Please wait."));
+				return;
+			}
+
+			if (g_interfaces.player1.IsCharDataNullPtr() || g_interfaces.player2.IsCharDataNullPtr())
+			{
+				Unavailable(L("Waiting for both characters to be available."));
+				return;
+			}
+
+			const bool mirrorMatch = g_interfaces.player1.GetData()->charIndex == g_interfaces.player2.GetData()->charIndex;
+
+			if (ImGui::BeginTable("CBRPlayers", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame))
+			{
+				ImGui::TableNextColumn();
+				ImGui::SeparatorText("Player 1 / Slot 1");
+				DrawCbrPlayerControls(0, mirrorMatch);
+
+				ImGui::TableNextColumn();
+				ImGui::SeparatorText("Player 2 / Slot 2");
+				DrawCbrPlayerControls(1, mirrorMatch);
+				ImGui::EndTable();
+			}
+
+			ImGui::VerticalSpacing(6);
+			if (ImGui::Button("Stop all CBR activity"))
+				cbr.EndCbrActivities();
+
+			ImGui::SameLine();
+			if (ImGui::Button("Replay both"))
+			{
+				CbrData* p1 = cbr.getCbrData(0);
+				CbrData* p2 = cbr.getCbrData(1);
+				if (p1 && p2 && p1->getReplayCount() > 0 && p2->getReplayCount() > 0 && !cbr.Replaying && !cbr.ReplayingP2)
+				{
+					cbr.EndCbrActivities();
+					cbr.Replaying = true;
+					cbr.ReplayingP2 = true;
+				}
+				else
+				{
+					cbr.EndCbrActivities();
+				}
+			}
+
+			ImGui::Text("Player name:");
+			ImGui::SetNextItemWidth(220.0f);
+			ImGui::InputText("##CBRPlayerName", cbr.playerName, IM_ARRAYSIZE(cbr.playerName));
+
+			ImGui::Text("Replay deletion range:");
+			ImGui::SetNextItemWidth(220.0f);
+			ImGui::DragIntRange2("##CBRDeleteRange", &cbr.deletionStart, &cbr.deletionEnd, 1.0f, 0);
+
+			const std::string state = cbr.WriteAiInterfaceState();
+			if (!state.empty())
+				ImGui::TextWrapped("%s", state.c_str());
+		}
+	}
+
 	void DrawTrainingPage(const PageContext& ctx)
 	{
 		ScrWindow* scr = ctx.container->GetWindow<ScrWindow>(WindowType_Scr);
@@ -53,6 +251,10 @@ namespace MainMenu
 		ImGui::VerticalSpacing(4);
 		GroupLabel(Training_Wakeup, inTraining);
 		scr->DrawWakeupBody();
+
+		ImGui::VerticalSpacing(8);
+		if (BeginSection(Training_CbrAi, inTraining))
+			DrawCbrSection(inTraining);
 
 		ImGui::VerticalSpacing(8);
 		ImGui::Separator();
