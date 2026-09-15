@@ -6,7 +6,6 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrData.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrInterface.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrReplayFile.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CbrSearchTree.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\CharacterStorage.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\Helper.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)src\CBR\Metadata.cpp" />

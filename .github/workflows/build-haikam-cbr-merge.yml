@@ -14,6 +14,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Apply modern CharData compatibility shim
+        shell: pwsh
+        run: |
+          git apply --check cbr-modern-compat.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git apply --verbose cbr-modern-compat.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
         with:
@@ -54,4 +62,5 @@ jobs:
           path: |
             bin/Release/dinput8.dll
             bin/Release/BBCFIMUpdater.exe
+            bin/Release/dinput8.pdb
           if-no-files-found: warn

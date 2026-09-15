@@ -1,0 +1,49 @@
+diff --git a/src/Game/CharData.h b/src/Game/CharData.h
+--- a/src/Game/CharData.h
++++ b/src/Game/CharData.h
+@@ -176,13 +176,19 @@ public:
+ 	int64_t currentSprite; // 0x01338 the name of the current sprite
+ 	char pad_1340[3252]; //0x01340
+ 	char lastAction[32]; // 0x1FF4
+-	char current_action2[32];// 0x2014 another current action I guess, gets set by the set_action_override
++	union {
++		char current_action2[32];// 0x2014 another current action I guess, gets set by the set_action_override
++		char currentActionNoNeutral[32]; // legacy CBR name for the same 0x2014 field
++	};
+ 	char pad_2034[12]; // 0x2034
+ 	char set_action_override[32]; // 0x2040 this sets the current action overriding the script order I guess? not sure, still need more testing
+ 	char pad_2060[16]; // 0x2060
+ 	char currentAction[32]; // 0x2070
+-	char pad_2090[440]; // 0x2090
++	char pad_2090[232]; // 0x2090
++	int32_t TagerMagnetism; // 0x2178, legacy CBR metadata
++	char pad_217C[204]; // 0x217C
+ 	char char_abbr[4]; //0x2248
+ 	//char pad_224C[40]; //0x224C
+ 	char pad_224C[20]; //0x224C
+@@ -385,15 +391,24 @@ public:
+ 
+ 	/*MOTION INPUT BUFFERS SHOULD END AT 0x1E9B0*/
+ 	int32_t slot2_or_slot4; //0x1E9C0 referring to the scr SLOTs, naoto only for now until i figure out more about this shit !!! this is actually the buffer for dash
+-
+-
+-
+-	char pad_1E9C4[5960]; //0x1E9C4 108036
++	int32_t Drive11; //0x1E9C4 legacy CBR: Bullet/Platinum/Susanoo/Nine/Kokonoe state
++	int32_t UnknownDriveVal0; //0x1E9C8 legacy CBR: Izanami ribcage
++	int32_t UnknownDriveVal1; //0x1E9CC legacy CBR: Izanami bit stance
++	int32_t CelicaRegen; //0x1E9D0
++	int32_t UnknownDriveVal3; //0x1E9D4
++	int32_t UnknownDriveVal4; //0x1E9D8
++	int32_t LitchiStaffState; //0x1E9DC
++	char pad_1E9E0[5928]; //preserve Drive0 at 0x20108 without changing CharData size
++	int32_t Drive0; //0x20108 legacy CBR: Rachel/Azrael/Platinum state
+ 	int32_t Drive1; //0x2010C
+ 	char pad_20110[12]; //0x20110
+ 	int32_t Drive1_type; //0x2011C
+-	char pad_20120[16]; //0x20120
++	char pad_20120[12]; //0x20120
++	int32_t DriveX; //0x2012C legacy CBR: Azrael bottom weakspot
+ 	int32_t Drive2; //0x20130
+ 	char pad_20134[32]; //0x20134
+ 	int32_t Drive3; //0x20154
