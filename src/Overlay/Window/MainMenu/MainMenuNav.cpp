@@ -33,6 +33,7 @@ namespace MainMenu
 			{ Page_Training, Item_Section, "Recording slots",     "playback slot record loop unlimited playback editor" },
 			{ Page_Training, Item_Group,   "Save states",         "snapshot save load state situation reset drill" },
 			{ Page_Training, Item_Group,   "Wake-up timing",      "wakeup delay emergency tech roll okizeme knockdown" },
+			{ Page_Training, Item_Section, "CBR AI",              "cbr ai case based reasoning instant learning clone record replay imitate bot" },
 			{ Page_Training, Item_Loose,   "TAS combo editor",    "tas frame by frame combo editor rewind record movie" },
 
 			{ Page_Overlays, Item_Section, "Hitboxes",            "hitbox hurtbox collision throw range origin box overlay" },
