@@ -1,71 +1,25 @@
-diff --git a/src/CBR/CbrSearchTree.h b/src/CBR/CbrSearchTree.h
---- a/src/CBR/CbrSearchTree.h
-+++ b/src/CBR/CbrSearchTree.h
-@@ -135,7 +135,8 @@ public:
- 
-         std::vector<CbrReplayFile>* replayFiles = &replayFilesIn;
-         int replayIndex = 0;
--        if (tree[y][x].cbrReplayIndex == -1) {
-+        const bool deletedNode = tree[y][x].cbrReplayIndex == -1;
-+        if (deletedNode) {
-             replayFiles = &deletedCases;
-         }
-         else {
-@@ -153,7 +154,9 @@ public:
-         float dissExtra = comparisonFunctionQuick(curGamestate, caseGamestate, caseReplay, caseData, replayIndex, caseIndex, false, curCosts, rsd.framesActive, rsd.activeReplay, rsd.activeCase, rsd.instantLearnSameReplay);
- 
-         if (((replayIndex != 0 || caseIndex != 0) || y == tree.size() - 1) && bestCandidate.similarity + maxRandomDiff >= dissimilarity + dissExtra) {
--            bestCaseCultivator(dissimilarity + dissExtra, replayIndex, caseIndex, caseSelector, false);
-+            if (!deletedNode) {
-+                bestCaseCultivator(dissimilarity + dissExtra, replayIndex, caseIndex, caseSelector, false);
-+            }
-             if (bestCandidate.similarity > dissimilarity + dissExtra) {
-                 bestCandidate.treePos.y = y;
-                 bestCandidate.treePos.x = x;
-@@ -191,7 +194,8 @@ public:
- 
-         auto* replayFiles = &replayFilesIn;
-         int replayIndex = 0;
--        if (tree[y][x].cbrReplayIndex == -1) {
-+        const bool deletedNode = tree[y][x].cbrReplayIndex == -1;
-+        if (deletedNode) {
-             replayFiles = &deletedCases;
-             replayIndex = 0;
-         }
-@@ -213,10 +217,12 @@ public:
-             bestCandidate.treePos.y = y;
-             bestCandidate.treePos.x = x;
-             bestCandidate.similarity = dissimilarity + dissExtra;
--            bestCaseCultivator(bestCandidate.similarity, replayIndex, caseIndex, caseSelector, false);
-+            if (!deletedNode) {
-+                bestCaseCultivator(bestCandidate.similarity, replayIndex, caseIndex, caseSelector, false);
-+            }
-         }
-         else {
--            if ((replayIndex != 0 || caseIndex != 0) && bestCandidate.similarity + maxRandomDiff > dissimilarity + dissExtra) {
-+            if (!deletedNode && (replayIndex != 0 || caseIndex != 0) && bestCandidate.similarity + maxRandomDiff > dissimilarity + dissExtra) {
-                 bestCaseCultivator(dissimilarity + dissExtra, replayIndex, caseIndex, caseSelector, false);
-             }
-         }
-@@ -426,7 +432,7 @@ public:
-                 else {
-                     deletedCases[0].getCaseBase()->push_back(std::move(replayFiles[tree[y][x].cbrReplayIndex].getCaseBase()->at(tree[y][x].cbrIndex)));
-                     tree[y][x].cbrReplayIndex = -1;
--                    tree[y][x].cbrIndex = deletedCases.size() - 1;
-+                    tree[y][x].cbrIndex = static_cast<int>(deletedCases[0].getCaseBase()->size()) - 1;
-                     return false;
-                 }
-             }
 diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
 --- a/src/CBR/CbrData.cpp
 +++ b/src/CBR/CbrData.cpp
-@@ -84,5 +84,14 @@ void CbrData::deleteReplays(int start, int end) {
-     for (int i = end; i >= start; i--) {
-         Searchtree.deleteReplay(i,replayFiles);
+@@ -78,8 +78,23 @@ void CbrData::deleteReplays(int start, int end) {
+     if (end < 0) { return; }
+     if (start >= replayFiles.size()) { return; }
+     if (end >= replayFiles.size()) { end = replayFiles.size() - 1; }
+-    for (int i = end; i >= start; i--) {
+-        Searchtree.deleteReplay(i,replayFiles);
++
++    const int eraseStart = std::max(start, 0);
++    const int eraseEnd = std::min(end + 1, static_cast<int>(replayFiles.size()));
++    replayFiles.erase(std::next(replayFiles.begin(), eraseStart), std::next(replayFiles.begin(), eraseEnd));
++
++    // The search tree stores positional indexes into replayFiles. Rebuilding it
++    // after deletion avoids stale node/replay indexes left by in-place tree surgery.
++    Searchtree = CbrSearchTree();
++    if (!replayFiles.empty()) {
++        Searchtree.generateTreeFromOldReplay(replayFiles, costs, curCosts);
      }
-     replayFiles.erase(std::next(replayFiles.begin(), std::max(start,0)), std::next(replayFiles.begin(), std::min(end+1, (int)replayFiles.size())));
-+    if (replayFiles.empty()) {
-+        Searchtree = CbrSearchTree();
+-    replayFiles.erase(std::next(replayFiles.begin(), std::max(start,0)), std::next(replayFiles.begin(), std::min(end+1, (int)replayFiles.size())));
++    else {
 +        resetCbr();
 +        resetInstantLearning();
 +        activeInstantLearn = false;
@@ -74,9 +28,7 @@ diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
 +        enabled = false;
 +    }
  }
-@@ -116,8 +125,12 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
- 
- 
+@@ -116,4 +131,8 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
      CbrReplayFile* replay = &instantLearnReplay;
 -    if (activeReplay != -1 && !activeInstantLearn && replayFiles.size() >= 1) {
 -         replay = &replayFiles[activeReplay];
@@ -87,10 +39,7 @@ diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
 +        }
 +        replay = &replayFiles[activeReplay];
      }
- 
-     //If the AI misses an attack that was meant to hit we wait untill the attack is done whiffing or untill it hits the opponent to search for the next case
-@@ -190,7 +203,15 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
-         bool nextInstantLearnSameReplay = true;
+@@ -190,6 +209,14 @@ int CbrData::CBRcomputeNextAction(Metadata* curGamestate) {
          if (bestReplay != -1) {
              if (!selectedCase.instantLearn) {
 +                if (selectedCase.replayIndex < 0 || selectedCase.replayIndex >= static_cast<int>(replayFiles.size())) {
@@ -98,10 +47,10 @@ diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
 +                    return 5;
 +                }
                  bestReplayFile = &replayFiles[selectedCase.replayIndex];
-             }
++            }
 +            if (selectedCase.caseIndex < 0 || selectedCase.caseIndex >= bestReplayFile->getCaseBaseLength()) {
 +                resetCbr();
 +                return 5;
-+            }
+             }
              bestFrame = bestReplayFile->getCase(selectedCase.caseIndex)->getStartingIndex();
          }
