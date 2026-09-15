@@ -26,7 +26,8 @@ jobs:
             "cbr-replay-delete-safety.patch",
             "cbr-data-manager-json-fix.patch",
             "cbr-match-lifecycle.patch",
-            "cbr-menu-mode-parity.patch"
+            "cbr-menu-mode-parity.patch",
+            "cbr-auto-save-lifecycle.patch"
           )
 
           foreach ($patch in $patches) {

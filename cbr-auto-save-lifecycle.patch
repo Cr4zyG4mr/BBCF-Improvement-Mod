@@ -1,0 +1,169 @@
+diff --git a/src/Core/settings.def b/src/Core/settings.def
+--- a/src/Core/settings.def
++++ b/src/Core/settings.def
+@@ -4,6 +4,8 @@
+ SETTING(std::string, togglebutton, "ToggleButton", "F1");
+ SETTING(std::string, toggleOnlineButton, "ToggleOnlineButton", "F2");
+ SETTING(std::string, toggleHUDbutton, "ToggleHUDButton", "F3");
++SETTING(std::string, cbrSavePendingKeybind, "CbrSavePendingKeybind", "Ctrl+F4");
++SETTING(std::string, cbrDiscardPendingKeybind, "CbrDiscardPendingKeybind", "Ctrl+F5");
+ SETTING(std::string, saveStateKeybind, "SaveStateKeybind", "F5");
+ SETTING(std::string, loadStateKeybind, "LoadStateKeybind", "F9");
+ SETTING(std::string, loadReplayStateKeybind, "LoadReplayStateKeybind", "F4");
+diff --git a/src/Core/hotkeys.def b/src/Core/hotkeys.def
+--- a/src/Core/hotkeys.def
++++ b/src/Core/hotkeys.def
+@@ -35,7 +35,15 @@
+ HOTKEY(LoadReplayState, loadReplayStateKeybind, "LoadReplayStateKeybind", "F4",
+ 	"Load replay takeover state",
+ 	"While watching a replay, jumps back to the saved moment so you can take over and try something different from there.")
+ 
++HOTKEY(CbrSavePending, cbrSavePendingKeybind, "CbrSavePendingKeybind", "Ctrl+F4",
++	"Save pending CBR recordings",
++	"Saves automatic CBR recordings from completed Versus or Online matches into the local AI data files.")
++
++HOTKEY(CbrDiscardPending, cbrDiscardPendingKeybind, "CbrDiscardPendingKeybind", "Ctrl+F5",
++	"Discard pending CBR recordings",
++	"Discards automatic CBR recordings that have not yet been saved into the local AI data files.")
++
+ 
+ HOTKEY(FreezeFrame, freezeFrameKeybind, "freezeFrameKeybind", "C",
+ 	"Pause / unpause the match",
+diff --git a/src/Game/MatchState.cpp b/src/Game/MatchState.cpp
+--- a/src/Game/MatchState.cpp
++++ b/src/Game/MatchState.cpp
+@@ -171,6 +171,12 @@ void MatchState::OnMatchEnd()
+ {
+ 	LOG(2, "MatchState::OnMatchEnd\n");
+ 
++	// The original KDing0 CBR build finalized automatic recordings as soon as
++	// BBCF left the in-match game state. This moves each completed AnnotatedReplay
++	// into the pending auto-record buffers so the lobby/results lifecycle can save
++	// them into the player's persistent .cbr data.
++	g_interfaces.cbrInterface.EndCbrActivities();
++
+ 	// Clear the mod's custom BGM footprint at match end so the game's native
+ 	// post-match transition (summary / Character Select / Main Menu) doesn't stall
+ 	// on our direct-XACT state. Idempotent with the Character Select hook.
+diff --git a/src/Overlay/WindowManager.cpp b/src/Overlay/WindowManager.cpp
+--- a/src/Overlay/WindowManager.cpp
++++ b/src/Overlay/WindowManager.cpp
+@@ -17,6 +17,7 @@
+ 
+ #include "Game/FrameStallDiagnostics.h"
+ #include "Game/FrameStallWatchdog.h"
++#include "Game/gamestates.h"
+ #include "Network/LobbyAvatarManager.h"
+ #include "Network/LobbyLinkManager.h"
+ #include "Game/ReplayTakeover/ReplayTakeoverFeatureFlags.h"
+@@ -48,6 +49,102 @@
+ 
+ #define DEFAULT_ALPHA 0.87f
+ 
++namespace
++{
++	bool HasPendingCbrAutoRecordings()
++	{
++		return !g_interfaces.cbrInterface.recordBufferP1.empty() ||
++			!g_interfaces.cbrInterface.recordBufferP2.empty();
++	}
++
++	void UpdateCbrAutoRecordLifecycle()
++	{
++		if (g_gameVals.pGameState == nullptr)
++			return;
++
++		CbrInterface& cbr = g_interfaces.cbrInterface;
++		const int gameState = *g_gameVals.pGameState;
++
++		// Belt-and-suspenders parity with the old render loop: if a match-transition
++		// hook was skipped for any reason, leaving state 15 still finalizes the active
++		// automatic recording before the save logic below can run.
++		if (gameState != GameState_InMatch && cbr.autoRecordActive)
++			cbr.EndCbrActivities();
++
++		// Match the old AI mod's post-match behavior. EndCbrActivities() marks an
++		// automatic recording finished and leaves the completed replay(s) buffered.
++		// The results screen reports that pending data before it is saved/discarded.
++		if (cbr.autoRecordFinished)
++		{
++			if (gameState == GameState_VictoryScreen)
++			{
++				const int pending = cbr.getAutoRecordReplayAmount();
++				if (cbr.autoRecordConfirmation)
++					g_notificationBar->AddNotification(
++						"Currently %d CBR replays unsaved. Return to lobby/character select to save them, or use %s to discard.",
++						pending,
++						HotkeyManager::DisplayString(HotkeyManager::GetBinding(HotkeyManager::Hotkey_CbrDiscardPending)).c_str());
++				else
++					g_notificationBar->AddNotification(
++						"Currently %d CBR replays unsaved. Use %s to save or %s to discard.",
++						pending,
++						HotkeyManager::DisplayString(HotkeyManager::GetBinding(HotkeyManager::Hotkey_CbrSavePending)).c_str(),
++						HotkeyManager::DisplayString(HotkeyManager::GetBinding(HotkeyManager::Hotkey_CbrDiscardPending)).c_str());
++			}
++			cbr.autoRecordFinished = false;
++		}
++
++		// This is the original "Auto Saving In Lobby" predicate: keep data pending
++		// through Versus (14), the match (15), and the first victory state (16).
++		// As soon as BBCF advances beyond those states, saveReplayDataInMenu merges
++		// the buffered replays into each player's existing local .cbr file.
++		if (cbr.autoRecordConfirmation &&
++			gameState != GameState_VersusScreen &&
++			gameState != GameState_InMatch &&
++			gameState != GameState_VictoryScreen &&
++			gameState != -1 &&
++			HasPendingCbrAutoRecordings() &&
++			!cbr.threadActiveCheck())
++		{
++			cbr.autoRecordSaveCompleted = false;
++			g_notificationBar->AddNotification("Saving CBR replays... please don't close the game.");
++			LOG(1, "[CBR] Auto-saving %d buffered replay(s) after match.\n", cbr.getAutoRecordReplayAmount());
++			cbr.threadSaveReplay(true);
++		}
++
++		if (HotkeyManager::WasPressed(HotkeyManager::Hotkey_CbrSavePending))
++		{
++			if (!HasPendingCbrAutoRecordings())
++				g_notificationBar->AddNotification("No pending CBR replays to save.");
++			else if (gameState == GameState_InMatch)
++				g_notificationBar->AddNotification("CBR recordings cannot be saved during a match.");
++			else if (!cbr.threadActiveCheck())
++			{
++				cbr.autoRecordSaveCompleted = false;
++				g_notificationBar->AddNotification("Saving CBR replays... please don't close the game.");
++				cbr.threadSaveReplay(true);
++			}
++		}
++
++		if (HotkeyManager::WasPressed(HotkeyManager::Hotkey_CbrDiscardPending))
++		{
++			if (!HasPendingCbrAutoRecordings())
++				g_notificationBar->AddNotification("No pending CBR replays to discard.");
++			else if (!cbr.threadActiveCheck())
++			{
++				cbr.clearAutomaticRecordReplays();
++				g_notificationBar->AddNotification("Pending CBR replays discarded.");
++			}
++		}
++
++		if (cbr.threadCheckSaving())
++		{
++			g_notificationBar->AddNotification("CBR replay saving completed.");
++			LOG(1, "[CBR] Buffered replay save completed.\n");
++		}
++	}
++}
++
+ 
+ // Fixed ImGui coordinate space requested by the 'viewport' setting, or (0,0) to follow the
+ // game window's client size. Applied every frame in ApplyViewportOverride().
+@@ -683,6 +769,7 @@ void WindowManager::Render()
+ 	LOG(7, "WindowManager::Render\n");
+ 
+ 	HandleButtons();
++	UpdateCbrAutoRecordLifecycle();
+ 
+ 	// Overlay self-A/B (OverlayAbTestSeconds): drop the entire ImGui pass for
+ 	// this frame. Hotkeys above still run, so the mod stays usable; only the
