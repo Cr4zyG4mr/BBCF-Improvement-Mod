@@ -1,7 +1,7 @@
 diff --git a/src/Game/CharData.h b/src/Game/CharData.h
 --- a/src/Game/CharData.h
 +++ b/src/Game/CharData.h
-@@ -176,13 +176,19 @@ public:
+@@ -176,12 +176,17 @@ public:
  	int64_t currentSprite; // 0x01338 the name of the current sprite
  	char pad_1340[3252]; //0x01340
  	char lastAction[32]; // 0x1FF4
@@ -21,7 +21,7 @@ diff --git a/src/Game/CharData.h b/src/Game/CharData.h
  	char char_abbr[4]; //0x2248
  	//char pad_224C[40]; //0x224C
  	char pad_224C[20]; //0x224C
-@@ -385,15 +391,24 @@ public:
+@@ -385,14 +390,20 @@ public:
  
  	/*MOTION INPUT BUFFERS SHOULD END AT 0x1E9B0*/
  	int32_t slot2_or_slot4; //0x1E9C0 referring to the scr SLOTs, naoto only for now until i figure out more about this shit !!! this is actually the buffer for dash
