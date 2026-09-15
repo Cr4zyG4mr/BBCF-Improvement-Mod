@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CBR/CbrInterface.h"
 #include "CustomGameMode/GameModeManager.h"
 #include "D3D9EXWrapper/d3d9.h"
 #include "D3D9EXWrapper/ID3D9EXWrapper_Device.h"
@@ -47,6 +48,7 @@ struct interfaces_t
 
 	Player player1;
 	Player player2;
+	CbrInterface cbrInterface;
 };
 
 struct gameVals_t
