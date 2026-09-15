@@ -1,6 +1,7 @@
 #include "WindowContainer.h"
 
 #include "Overlay/Window/DebugWindow.h"
+#include "Overlay/Window/CbrServerWindow.h"
 #include "Overlay/Window/HitboxOverlay.h"
 #include "Overlay/Window/LogWindow.h"
 #include "Overlay/Window/MainWindow.h"
@@ -62,6 +63,9 @@ WindowContainer::WindowContainer()
 
         AddWindow(WindowType_Room,
                 new RoomWindow(std::string(Messages.Online()) + "###Room", true, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse));
+
+	AddWindow(WindowType_CbrServer,
+		new CbrServerWindow("CBR Data Manager", true));
 
 	AddWindow(WindowType_Scr,
 		new ScrWindow("States", true, *this));

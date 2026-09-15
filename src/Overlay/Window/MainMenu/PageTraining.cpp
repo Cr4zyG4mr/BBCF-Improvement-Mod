@@ -15,7 +15,20 @@ namespace MainMenu
 {
 	namespace
 	{
-		void DrawCbrPlayerControls(int playerIndex, bool mirrorMatch)
+		void OpenCbrDataManager(WindowContainer* container, int loadSlot)
+		{
+			if (!container)
+				return;
+
+			CbrInterface& cbr = g_interfaces.cbrInterface;
+			cbr.windowLoadNr = loadSlot;
+			cbr.windowReload = true;
+
+			if (IWindow* manager = container->GetWindow(WindowType_CbrServer))
+				manager->Open();
+		}
+
+		void DrawCbrPlayerControls(int playerIndex, bool mirrorMatch, WindowContainer* container)
 		{
 			CbrInterface& cbr = g_interfaces.cbrInterface;
 			Player& player = playerIndex == 0 ? g_interfaces.player1 : g_interfaces.player2;
@@ -124,17 +137,29 @@ namespace MainMenu
 				cbr.EndCbrActivities();
 				cbr.LoadCbrData(cbr.playerName, player.GetData()->char_abbr, true, playerIndex);
 			}
+			if (ImGui::Button("Browse / load data...", ImVec2(-1.0f, 0.0f)))
+			{
+				cbr.EndCbrActivities();
+				OpenCbrDataManager(container, playerIndex);
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Open the CBR data manager and load or merge a saved AI file into this slot.");
 
 			ImGui::PopID();
 		}
 
-		void DrawCbrSection(bool inTraining)
+		void DrawCbrSection(bool inTraining, WindowContainer* container)
 		{
 			CbrInterface& cbr = g_interfaces.cbrInterface;
 			cbr.loadSettings(&cbr);
 
 			Hint(L("CBR AI learns from recorded player behaviour and imitates it. Record examples, replay them as an AI, or use instant learning in a mirror match."));
 			Hint(L("The menu is wired first. The CBR runtime input hooks are still being ported into the HaiKamDesu base, so these controls will not affect gameplay until that runtime wiring is finished."));
+
+			if (ImGui::Button("CBR data manager..."))
+				OpenCbrDataManager(container, -1);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Browse, filter, upload, download, and delete CBR data. Slot-specific load and merge buttons are available from each player column below.");
 
 			bool settingsChanged = false;
 			settingsChanged |= ImGui::Checkbox("Auto record myself", &cbr.autoRecordGameOwner);
@@ -168,11 +193,11 @@ namespace MainMenu
 			{
 				ImGui::TableNextColumn();
 				ImGui::SeparatorText("Player 1 / Slot 1");
-				DrawCbrPlayerControls(0, mirrorMatch);
+				DrawCbrPlayerControls(0, mirrorMatch, container);
 
 				ImGui::TableNextColumn();
 				ImGui::SeparatorText("Player 2 / Slot 2");
-				DrawCbrPlayerControls(1, mirrorMatch);
+				DrawCbrPlayerControls(1, mirrorMatch, container);
 				ImGui::EndTable();
 			}
 
@@ -254,7 +279,7 @@ namespace MainMenu
 
 		ImGui::VerticalSpacing(8);
 		if (BeginSection(Training_CbrAi, inTraining))
-			DrawCbrSection(inTraining);
+			DrawCbrSection(inTraining, ctx.container);
 
 		ImGui::VerticalSpacing(8);
 		ImGui::Separator();
