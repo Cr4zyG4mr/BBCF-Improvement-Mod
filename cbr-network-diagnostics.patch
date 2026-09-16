@@ -1,0 +1,550 @@
+diff --git a/BBCF_IM.vcxproj b/BBCF_IM.vcxproj
+index aa2e61e..f4c21ad 100644
+--- a/BBCF_IM.vcxproj
++++ b/BBCF_IM.vcxproj
+@@ -359,6 +359,7 @@
+     <ClInclude Include="src\SteamApiWrapper\SteamFriendsWrapper.h" />
+     <ClInclude Include="src\SteamApiWrapper\SteamMatchmakingWrapper.h" />
+     <ClInclude Include="src\SteamApiWrapper\SteamNetworkingWrapper.h" />
++    <ClInclude Include="src\SteamApiWrapper\SteamNetworkDiagnostics.h" />
+     <ClInclude Include="src\SteamApiWrapper\SteamUserStatsWrapper.h" />
+     <ClInclude Include="src\SteamApiWrapper\SteamUserWrapper.h" />
+     <ClInclude Include="src\SteamApiWrapper\SteamUtilsWrapper.h" />
+diff --git a/src/D3D9EXWrapper/ID3D9EXWrapper_Device.cpp b/src/D3D9EXWrapper/ID3D9EXWrapper_Device.cpp
+index 0bbbcac..b6491a8 100644
+--- a/src/D3D9EXWrapper/ID3D9EXWrapper_Device.cpp
++++ b/src/D3D9EXWrapper/ID3D9EXWrapper_Device.cpp
+@@ -360,6 +360,8 @@ HRESULT APIENTRY Direct3DDevice9ExWrapper::EndScene()
+ 	}
+ 	{
+ 		FrameStallDiagnostics::ScopedSection section(FrameStallDiagnostics::Section_EndSceneMisc);
++		if (g_interfaces.pSteamNetworkingWrapper)
++			g_interfaces.pSteamNetworkingWrapper->DiagnosticFrame();
+ 		// Runs on every real rendered frame, unlike the battle-frame-counter hook (which
+ 		// goes idle during the reset fadeout's limbo - see TickTrainingResetSwap's comment).
+ 		ScrWindow::TickTrainingResetSwap();
+diff --git a/src/Hooks/hooks_detours.cpp b/src/Hooks/hooks_detours.cpp
+index 97a80a6..fffb98c 100644
+--- a/src/Hooks/hooks_detours.cpp
++++ b/src/Hooks/hooks_detours.cpp
+@@ -1532,7 +1532,9 @@ void __cdecl hook_SteamAPI_RunCallbacks()
+ 	// the former is not our cost, but it can block, so it needs its own line.
+ 	{
+ 		FrameStallDiagnostics::ScopedSection section(FrameStallDiagnostics::Section_SteamNative);
++		const auto diagnosticStart = SteamNetworkingWrapper::DiagnosticCallbacksBegin();
+ 		orig_SteamAPI_RunCallbacks();
++		SteamNetworkingWrapper::DiagnosticCallbacksEnd(diagnosticStart);
+ 	}
+ 
+ 	FrameStallDiagnostics::ScopedSection section(FrameStallDiagnostics::Section_SteamPump);
+diff --git a/src/Network/RankedListConnectionFilter.cpp b/src/Network/RankedListConnectionFilter.cpp
+index d3fd395..6258e4e 100644
+--- a/src/Network/RankedListConnectionFilter.cpp
++++ b/src/Network/RankedListConnectionFilter.cpp
+@@ -425,6 +425,7 @@ void RankedListConnectionFilter::OnP2PSessionConnectFail(P2PSessionConnectFail_t
+ 	{
+ 		return;
+ 	}
++	SteamNetworkingWrapper::DiagnosticFailure(pParam->m_steamIDRemote, pParam->m_eP2PSessionError);
+ 
+ 	// Steam's own verdict that this peer can't be reached - may arrive well
+ 	// after our short hold window (observed ~20s for true-dead peers). Feeds
+diff --git a/src/SteamApiWrapper/SteamNetworkDiagnostics.h b/src/SteamApiWrapper/SteamNetworkDiagnostics.h
+new file mode 100644
+index 0000000..8352047
+--- /dev/null
++++ b/src/SteamApiWrapper/SteamNetworkDiagnostics.h
+@@ -0,0 +1,197 @@
++#pragma once
++
++#include <array>
++#include <atomic>
++#include <cstdint>
++
++// Observation only: fixed storage, no packet contents, no waiting on another
++// thread, and no Steam calls or disk IO while holding the counter lock.
++namespace SteamNetDiag
++{
++using Count = unsigned long long;
++constexpr unsigned MaxPeers = 16;
++constexpr unsigned MaxChannels = 4;
++constexpr Count SampleMs = 1000;
++constexpr Count RetainMs = 60000;
++
++struct Channel
++{
++	bool used = false;
++	int id = 0;
++	Count sends = 0, accepted = 0, received = 0;
++};
++
++struct Peer
++{
++	Count id = 0, serial = 0, touched = 0;
++	Count sends = 0, accepted = 0, sentBytes = 0, received = 0, receivedBytes = 0;
++	Count lastSend = 0, lastAccepted = 0, lastReceive = 0;
++	Count maxSendMs = 0, maxReadMs = 0;
++	Count accepts = 0, closes = 0, channelCloses = 0, failures = 0;
++	int lastError = -1, lastSendType = -1;
++	bool closed = false;
++	std::array<Channel, MaxChannels> channels{};
++	Count channelOverflow = 0;
++};
++
++struct Activity
++{
++	Count frames = 0, lastFrame = 0, maxFrameGapMs = 0;
++	Count callbacksBegin = 0, callbacksEnd = 0, lastCallbacksBegin = 0, lastCallbacksEnd = 0;
++	Count maxCallbacksMs = 0, maxCallbacksGapMs = 0;
++	Count polls = 0, available = 0, reads = 0, readOK = 0;
++	Count lastPoll = 0, lastRead = 0, maxPollMs = 0, maxReadMs = 0;
++	int lastPollChannel = -1, lastReadChannel = -1;
++};
++
++struct Snapshot
++{
++	Count tick = 0, intervalMs = 0, evictions = 0, skipped = 0, eventsSuppressed = 0;
++	Activity activity{};
++	std::array<Peer, MaxPeers> peers{};
++};
++
++class Counters
++{
++	std::atomic_flag busy = ATOMIC_FLAG_INIT;
++	std::atomic<unsigned> skipped{0};
++	Activity activity{};
++	std::array<Peer, MaxPeers> peers{};
++	Count serial = 0, evictions = 0, lastSample = 0, lastTraffic = 0;
++	Count eventWindow = 0, eventCount = 0, eventsSuppressed = 0;
++
++	struct Guard
++	{
++		Counters& owner;
++		bool held;
++		explicit Guard(Counters& value) : owner(value), held(!owner.busy.test_and_set(std::memory_order_acquire))
++		{
++			if (!held) owner.skipped.fetch_add(1, std::memory_order_relaxed);
++		}
++		~Guard() { if (held) owner.busy.clear(std::memory_order_release); }
++	};
++
++	Peer& Find(Count id, Count now)
++	{
++		if (now > lastTraffic) lastTraffic = now;
++		Peer* oldest = &peers[0];
++		for (auto& peer : peers)
++		{
++			if (peer.id == id) { if (now > peer.touched) peer.touched = now; return peer; }
++			if (!peer.id || (oldest->id && peer.touched < oldest->touched)) oldest = &peer;
++		}
++		if (oldest->id) ++evictions;
++		*oldest = Peer{};
++		oldest->id = id;
++		oldest->serial = ++serial;
++		oldest->touched = now;
++		return *oldest;
++	}
++
++	Channel* FindChannel(Peer& peer, int id)
++	{
++		for (auto& channel : peer.channels) if (channel.used && channel.id == id) return &channel;
++		for (auto& channel : peer.channels) if (!channel.used)
++		{
++			channel.used = true;
++			channel.id = id;
++			return &channel;
++		}
++		++peer.channelOverflow;
++		return nullptr;
++	}
++
++	static void Max(Count& value, Count sample) { if (sample > value) value = sample; }
++
++public:
++	bool AllowEventLog(Count now)
++	{
++		Guard guard(*this); if (!guard.held) return false;
++		if (now - eventWindow >= SampleMs) { eventWindow = now; eventCount = 0; }
++		if (eventCount >= 32) { ++eventsSuppressed; return false; }
++		++eventCount;
++		return true;
++	}
++
++	void Send(Count id, int channel, int type, unsigned bytes, bool ok, Count now, Count elapsed)
++	{
++		if (!id) return;
++		Guard guard(*this); if (!guard.held) return;
++		auto& peer = Find(id, now);
++		++peer.sends; peer.lastSend = now; peer.lastSendType = type;
++		// A send after close is a new connection attempt, even when it fails.
++		peer.closed = false;
++		Max(peer.maxSendMs, elapsed);
++		if (ok) { ++peer.accepted; peer.sentBytes += bytes; peer.lastAccepted = now; }
++		if (auto* stream = FindChannel(peer, channel)) { ++stream->sends; if (ok) ++stream->accepted; }
++	}
++
++	void Read(Count id, int channel, unsigned bytes, bool ok, Count now, Count elapsed)
++	{
++		Guard guard(*this); if (!guard.held) return;
++		++activity.reads; activity.lastRead = now; activity.lastReadChannel = channel;
++		Max(activity.maxReadMs, elapsed);
++		if (!ok) return; // No packet is not itself a connection error.
++		++activity.readOK;
++		if (!id) return;
++		auto& peer = Find(id, now);
++		++peer.received; peer.receivedBytes += bytes; peer.lastReceive = now; peer.closed = false;
++		Max(peer.maxReadMs, elapsed);
++		if (auto* stream = FindChannel(peer, channel)) ++stream->received;
++	}
++
++	void Poll(int channel, bool available, Count now, Count elapsed)
++	{
++		Guard guard(*this); if (!guard.held) return;
++		++activity.polls; if (available) ++activity.available;
++		activity.lastPoll = now; activity.lastPollChannel = channel;
++		Max(activity.maxPollMs, elapsed);
++	}
++
++	enum Event { Accept, CloseSession, CloseChannel, Failure };
++	void Lifecycle(Count id, Event event, bool ok, int error, Count now)
++	{
++		if (!id) return;
++		Guard guard(*this); if (!guard.held) return;
++		auto& peer = Find(id, now);
++		switch (event)
++		{
++		case Accept: ++peer.accepts; if (ok) peer.closed = false; break;
++		case CloseSession: ++peer.closes; if (ok) peer.closed = true; break;
++		case CloseChannel: ++peer.channelCloses; break; // Other channels may still be open.
++		case Failure: ++peer.failures; peer.lastError = error; break;
++		}
++	}
++
++	void CallbacksBegin(Count now)
++	{
++		Guard guard(*this); if (!guard.held) return;
++		if (activity.lastCallbacksBegin) Max(activity.maxCallbacksGapMs, now - activity.lastCallbacksBegin);
++		++activity.callbacksBegin; activity.lastCallbacksBegin = now;
++	}
++	void CallbacksEnd(Count now, Count elapsed)
++	{
++		Guard guard(*this); if (!guard.held) return;
++		++activity.callbacksEnd; activity.lastCallbacksEnd = now;
++		Max(activity.maxCallbacksMs, elapsed);
++	}
++
++	bool Frame(Count now, Snapshot& out)
++	{
++		Guard guard(*this); if (!guard.held) return false;
++		if (activity.lastFrame) Max(activity.maxFrameGapMs, now - activity.lastFrame);
++		++activity.frames; activity.lastFrame = now;
++		if (!lastTraffic || (now >= lastTraffic && now - lastTraffic > RetainMs) || now - lastSample < SampleMs) return false;
++		out.tick = now; out.intervalMs = lastSample ? now - lastSample : 0;
++		out.activity = activity; out.peers = peers;
++		out.evictions = evictions; out.skipped = skipped.load(std::memory_order_relaxed);
++		out.eventsSuppressed = eventsSuppressed;
++		lastSample = now;
++		// Counters are cumulative; maxima describe the interval since the last snapshot.
++		activity.maxFrameGapMs = activity.maxCallbacksMs = activity.maxCallbacksGapMs = 0;
++		activity.maxPollMs = activity.maxReadMs = 0;
++		for (auto& peer : peers) peer.maxSendMs = peer.maxReadMs = 0;
++		return true;
++	}
++};
++}
+diff --git a/src/SteamApiWrapper/SteamNetworkingWrapper.cpp b/src/SteamApiWrapper/SteamNetworkingWrapper.cpp
+index b29b7b1..b012a4e 100644
+--- a/src/SteamApiWrapper/SteamNetworkingWrapper.cpp
++++ b/src/SteamApiWrapper/SteamNetworkingWrapper.cpp
+@@ -1,4 +1,5 @@
+ #include "SteamNetworkingWrapper.h"
++#include "SteamNetworkDiagnostics.h"
+ 
+ #include "Core/interfaces.h"
+ #include "Core/logger.h"
+@@ -6,6 +7,137 @@
+ #include "Game/gamestates.h"
+ #include "Overlay/Logger/ImGuiLogger.h"
+ 
++#include <cstdio>
++#include <intrin.h>
++
++namespace
++{
++SteamNetDiag::Counters g_netDiagnostics;
++
++struct NetDiagnosticLastError
++{
++	DWORD saved = GetLastError();
++	~NetDiagnosticLastError() { SetLastError(saved); }
++};
++
++// Pointer discovery belongs to the existing hooks. Failed diagnostic reads must
++// not become a new game crash, including during startup and shutdown transitions.
++int NetDiagnosticValue(const int* value)
++{
++	__try { return value ? *value : -1; }
++	__except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
++}
++
++long long NetDiagnosticAge(unsigned long long now, unsigned long long then)
++{
++	return then ? static_cast<long long>(now >= then ? now - then : 0) : -1;
++}
++}
++
++#define NETDIAG_LOG(...) do { NetDiagnosticLastError preserve; ForceLog(__VA_ARGS__); } while (false)
++
++unsigned long long SteamNetworkingWrapper::DiagnosticCallbacksBegin()
++{
++	if (!IsLoggingEnabled()) return 0;
++	NetDiagnosticLastError preserve;
++	const auto now = GetTickCount64();
++	g_netDiagnostics.CallbacksBegin(now);
++	return now;
++}
++
++void SteamNetworkingWrapper::DiagnosticCallbacksEnd(unsigned long long started)
++{
++	if (!started) return;
++	NetDiagnosticLastError preserve;
++	const auto now = GetTickCount64();
++	g_netDiagnostics.CallbacksEnd(now, now - started);
++}
++
++void SteamNetworkingWrapper::DiagnosticFailure(CSteamID remote, int error)
++{
++	if (!IsLoggingEnabled()) return;
++	NetDiagnosticLastError preserve;
++	const auto now = GetTickCount64();
++	const auto id = static_cast<unsigned long long>(remote.ConvertToUint64());
++	g_netDiagnostics.Lifecycle(id, SteamNetDiag::Counters::Failure, false, error, now);
++	if (g_netDiagnostics.AllowEventLog(now))
++		NETDIAG_LOG("[NETDIAG] event=connect-fail tick=%llu peer=%llu error=%d", now, id, error);
++}
++
++void SteamNetworkingWrapper::DiagnosticFrame()
++{
++	if (!IsLoggingEnabled()) return;
++	NetDiagnosticLastError preserve;
++	// EndScene is normally single-threaded. Avoid simultaneous/reentrant samplers
++	// without ever making the renderer or network calls wait for diagnostics.
++	static std::atomic_flag sampling = ATOMIC_FLAG_INIT;
++	if (sampling.test_and_set(std::memory_order_acquire)) return;
++	struct Release { std::atomic_flag& flag; ~Release() { flag.clear(std::memory_order_release); } } release{sampling};
++	static SteamNetDiag::Snapshot snapshot;
++	const auto now = GetTickCount64();
++	if (!g_netDiagnostics.Frame(now, snapshot)) return;
++	static unsigned queryCursor = 0;
++	static unsigned long long previousCostMs = 0;
++	const auto& a = snapshot.activity;
++	NETDIAG_LOG("[NETDIAG] sample tick=%llu intervalMs=%llu mode=%d game=%d match=%d frames=%llu frameGapMaxMs=%llu "
++		"cbBegin=%llu cbEnd=%llu cbBeginAgeMs=%lld cbEndAgeMs=%lld cbMaxMs=%llu cbGapMaxMs=%llu "
++		"polls=%llu available=%llu pollAgeMs=%lld pollChannel=%d pollMaxMs=%llu "
++		"reads=%llu readOK=%llu readAgeMs=%lld readChannel=%d readMaxMs=%llu "
++		"evictions=%llu skipped=%llu eventsSuppressed=%llu previousSampleCostMs=%llu",
++		now, snapshot.intervalMs, NetDiagnosticValue(g_gameVals.pGameMode), NetDiagnosticValue(g_gameVals.pGameState),
++		NetDiagnosticValue(g_gameVals.pMatchState), a.frames, a.maxFrameGapMs,
++		a.callbacksBegin, a.callbacksEnd, NetDiagnosticAge(now, a.lastCallbacksBegin), NetDiagnosticAge(now, a.lastCallbacksEnd),
++		a.maxCallbacksMs, a.maxCallbacksGapMs, a.polls, a.available, NetDiagnosticAge(now, a.lastPoll), a.lastPollChannel, a.maxPollMs,
++		a.reads, a.readOK, NetDiagnosticAge(now, a.lastRead), a.lastReadChannel, a.maxReadMs,
++		snapshot.evictions, snapshot.skipped, snapshot.eventsSuppressed, previousCostMs);
++
++	unsigned queries = 0;
++	unsigned long long queryTotalMs = 0;
++	const unsigned start = queryCursor;
++	for (unsigned offset = 0; offset < SteamNetDiag::MaxPeers; ++offset)
++	{
++		const unsigned index = (start + offset) % SteamNetDiag::MaxPeers;
++		const auto& peer = snapshot.peers[index];
++		if (!peer.id || (now >= peer.touched && now - peer.touched > SteamNetDiag::RetainMs)) continue;
++		P2PSessionState_t state{};
++		bool queried = false, stateOK = false;
++		unsigned long long queryMs = 0;
++		// Read-only Steam IPC: at most four queries per second, rotated across peers.
++		// Stop issuing additional queries if state reads have already cost 5 ms.
++		if (!peer.closed && m_SteamNetworking && queries < 4 && queryTotalMs < 5)
++		{
++			queried = true; ++queries;
++			const auto begin = GetTickCount64();
++			stateOK = m_SteamNetworking->GetP2PSessionState(CSteamID(peer.id), &state);
++			queryMs = GetTickCount64() - begin;
++			queryTotalMs += queryMs;
++			queryCursor = (index + 1) % SteamNetDiag::MaxPeers;
++		}
++		char channels[320]{};
++		size_t used = 0;
++		for (const auto& channel : peer.channels)
++		{
++			if (!channel.used || used >= sizeof(channels) - 1) continue;
++			const int written = std::snprintf(channels + used, sizeof(channels) - used, "%s%d:%llu/%llu/%llu",
++				used ? "," : "", channel.id, channel.sends, channel.accepted, channel.received);
++			if (written > 0) used += static_cast<size_t>(written);
++		}
++		NETDIAG_LOG("[NETDIAG] peer tick=%llu peer=%llu serial=%llu txCalls=%llu txAccepted=%llu txBytes=%llu "
++			"rxPackets=%llu rxBytes=%llu txAgeMs=%lld txAcceptedAgeMs=%lld rxAgeMs=%lld txType=%d txMaxMs=%llu rxMaxMs=%llu "
++			"acceptCalls=%llu closeCalls=%llu closeChannelCalls=%llu failures=%llu lastFailure=%d closed=%d "
++			"channels(send/accepted/recv)=[%s] channelOverflow=%llu queried=%d stateOK=%d active=%d connecting=%d "
++			"error=%d relay=%d queuedBytes=%d queuedPackets=%d queryMs=%llu",
++			now, peer.id, peer.serial, peer.sends, peer.accepted, peer.sentBytes, peer.received, peer.receivedBytes,
++			NetDiagnosticAge(now, peer.lastSend), NetDiagnosticAge(now, peer.lastAccepted), NetDiagnosticAge(now, peer.lastReceive),
++			peer.lastSendType, peer.maxSendMs, peer.maxReadMs, peer.accepts, peer.closes, peer.channelCloses, peer.failures,
++			peer.lastError, peer.closed ? 1 : 0, channels, peer.channelOverflow, queried ? 1 : 0, stateOK ? 1 : 0,
++			stateOK ? state.m_bConnectionActive : -1, stateOK ? state.m_bConnecting : -1,
++			stateOK ? state.m_eP2PSessionError : -1, stateOK ? state.m_bUsingRelay : -1,
++			stateOK ? state.m_nBytesQueuedForSend : -1, stateOK ? state.m_nPacketsQueuedForSend : -1, queryMs);
++	}
++	previousCostMs = GetTickCount64() - now;
++}
++
+ SteamNetworkingWrapper::SteamNetworkingWrapper(ISteamNetworking** pSteamNetworking)
+ {
+ 	LOG(2, "SteamNetworkingWrapper\n");
+@@ -16,6 +148,9 @@ SteamNetworkingWrapper::SteamNetworkingWrapper(ISteamNetworking** pSteamNetworki
+ 	WriteToProtectedMemory((uintptr_t)pSteamNetworking, (char*)&thisAddress, 4); //basically *pSteamNetworking = this;
+ 
+ 	LOG(2, "\t- after: *pSteamNetworking: 0x%p, m_SteamNetworking: 0x%p\n", *pSteamNetworking, m_SteamNetworking);
++	if (IsLoggingEnabled())
++		NETDIAG_LOG("[NETDIAG] enabled version=1 intervalMs=1000 peers=16 retainMs=60000 stateQueriesMax=4 "
++			"txAcceptedMeansQueuedNotDelivered=1 native=%p", m_SteamNetworking);
+ }
+ 
+ SteamNetworkingWrapper::~SteamNetworkingWrapper()
+@@ -29,20 +164,49 @@ bool SteamNetworkingWrapper::SendP2PPacket(CSteamID steamIDRemote, const void *p
+ 	// Log outgoing data:
+ 	// LOG(2, "\t- %s\n", RawMemoryArrayToString((unsigned char*)pubData, cubData));
+ 
+-	return m_SteamNetworking->SendP2PPacket(steamIDRemote, pubData, cubData, eP2PSendType, nChannel);
++	const bool diagnostic = IsLoggingEnabled();
++	const auto begin = diagnostic ? GetTickCount64() : 0;
++	const bool result = m_SteamNetworking->SendP2PPacket(steamIDRemote, pubData, cubData, eP2PSendType, nChannel);
++	if (diagnostic)
++	{
++		NetDiagnosticLastError preserve;
++		const auto now = GetTickCount64();
++		g_netDiagnostics.Send(steamIDRemote.ConvertToUint64(), nChannel, static_cast<int>(eP2PSendType), cubData, result, now, now - begin);
++	}
++	return result;
+ }
+ 
+ bool SteamNetworkingWrapper::IsP2PPacketAvailable(uint32 *pcubMsgSize, int nChannel)
+ { 
+ 	LOG(7, "SteamNetworkingWrapper IsP2PPacketAvailable\n"); 
+-	return m_SteamNetworking->IsP2PPacketAvailable(pcubMsgSize, nChannel);
++	const bool diagnostic = IsLoggingEnabled();
++	const auto begin = diagnostic ? GetTickCount64() : 0;
++	const bool result = m_SteamNetworking->IsP2PPacketAvailable(pcubMsgSize, nChannel);
++	if (diagnostic)
++	{
++		NetDiagnosticLastError preserve;
++		const auto now = GetTickCount64();
++		g_netDiagnostics.Poll(nChannel, result, now, now - begin);
++	}
++	return result;
+ }
+ 
+ bool SteamNetworkingWrapper::ReadP2PPacket(void *pubDest, uint32 cubDest, uint32 *pcubMsgSize, CSteamID *psteamIDRemote, int nChannel)
+ { 
+ 	LOG(7, "SteamNetworkingWrapper ReadP2PPacket\n");
+ 
++	const bool diagnostic = IsLoggingEnabled();
++	const auto begin = diagnostic ? GetTickCount64() : 0;
+ 	bool ret = m_SteamNetworking->ReadP2PPacket(pubDest, cubDest, pcubMsgSize, psteamIDRemote, nChannel);
++	NetDiagnosticLastError preserve;
++	if (diagnostic)
++	{
++		const auto now = GetTickCount64();
++		// Steam does not define output values on failure; never read them then.
++		const auto remote = ret && psteamIDRemote ? psteamIDRemote->ConvertToUint64() : 0;
++		const auto bytes = ret && pcubMsgSize ? *pcubMsgSize : 0;
++		g_netDiagnostics.Read(remote, nChannel, bytes, ret, now, now - begin);
++	}
+ 
+ 	if (ret && psteamIDRemote)
+ 	{
+@@ -67,19 +231,52 @@ bool SteamNetworkingWrapper::AcceptP2PSessionWithUser(CSteamID steamIDRemote)
+ 	LOG(7, "SteamNetworkingWrapper AcceptP2PSessionWithUser\n");
+ 	ForceLog("[CBR-ID-PROBE] AcceptP2PSessionWithUser remote=%llu",
+ 		static_cast<unsigned long long>(steamIDRemote.ConvertToUint64()));
+-	return m_SteamNetworking->AcceptP2PSessionWithUser(steamIDRemote);
++	const auto begin = GetTickCount64();
++	const bool diagnostic = IsLoggingEnabled();
++	const bool trace = diagnostic && g_netDiagnostics.AllowEventLog(begin);
++	const auto id = static_cast<unsigned long long>(steamIDRemote.ConvertToUint64());
++	if (trace) NETDIAG_LOG("[NETDIAG] event=accept-begin tick=%llu peer=%llu caller=%p", begin, id, _ReturnAddress());
++	const auto callStart = GetTickCount64();
++	const bool result = m_SteamNetworking->AcceptP2PSessionWithUser(steamIDRemote);
++	NetDiagnosticLastError preserve;
++	const auto now = GetTickCount64();
++	if (diagnostic) g_netDiagnostics.Lifecycle(id, SteamNetDiag::Counters::Accept, result, -1, now);
++	if (trace) NETDIAG_LOG("[NETDIAG] event=accept-end tick=%llu peer=%llu result=%d elapsedMs=%llu", now, id, result ? 1 : 0, now - callStart);
++	return result;
+ }
+ 
+ bool SteamNetworkingWrapper::CloseP2PSessionWithUser(CSteamID steamIDRemote)
+ {
+ 	LOG(7, "SteamNetworkingWrapper CloseP2PSessionWithUser\n");
+-	return m_SteamNetworking->CloseP2PSessionWithUser(steamIDRemote);
++	const auto begin = GetTickCount64();
++	const bool diagnostic = IsLoggingEnabled();
++	const bool trace = diagnostic && g_netDiagnostics.AllowEventLog(begin);
++	const auto id = static_cast<unsigned long long>(steamIDRemote.ConvertToUint64());
++	if (trace) NETDIAG_LOG("[NETDIAG] event=close-session-begin tick=%llu peer=%llu caller=%p", begin, id, _ReturnAddress());
++	const auto callStart = GetTickCount64();
++	const bool result = m_SteamNetworking->CloseP2PSessionWithUser(steamIDRemote);
++	NetDiagnosticLastError preserve;
++	const auto now = GetTickCount64();
++	if (diagnostic) g_netDiagnostics.Lifecycle(id, SteamNetDiag::Counters::CloseSession, result, -1, now);
++	if (trace) NETDIAG_LOG("[NETDIAG] event=close-session-end tick=%llu peer=%llu result=%d elapsedMs=%llu", now, id, result ? 1 : 0, now - callStart);
++	return result;
+ }
+ 
+ bool SteamNetworkingWrapper::CloseP2PChannelWithUser(CSteamID steamIDRemote, int nChannel)
+ {
+ 	LOG(7, "SteamNetworkingWrapper CloseP2PChannelWithUser\n");
+-	return m_SteamNetworking->CloseP2PChannelWithUser(steamIDRemote, nChannel);
++	const auto begin = GetTickCount64();
++	const bool diagnostic = IsLoggingEnabled();
++	const bool trace = diagnostic && g_netDiagnostics.AllowEventLog(begin);
++	const auto id = static_cast<unsigned long long>(steamIDRemote.ConvertToUint64());
++	if (trace) NETDIAG_LOG("[NETDIAG] event=close-channel-begin tick=%llu peer=%llu channel=%d caller=%p", begin, id, nChannel, _ReturnAddress());
++	const auto callStart = GetTickCount64();
++	const bool result = m_SteamNetworking->CloseP2PChannelWithUser(steamIDRemote, nChannel);
++	NetDiagnosticLastError preserve;
++	const auto now = GetTickCount64();
++	if (diagnostic) g_netDiagnostics.Lifecycle(id, SteamNetDiag::Counters::CloseChannel, result, -1, now);
++	if (trace) NETDIAG_LOG("[NETDIAG] event=close-channel-end tick=%llu peer=%llu channel=%d result=%d elapsedMs=%llu", now, id, nChannel, result ? 1 : 0, now - callStart);
++	return result;
+ }
+ 
+ bool SteamNetworkingWrapper::GetP2PSessionState(CSteamID steamIDRemote, P2PSessionState_t *pConnectionState)
+@@ -91,7 +288,11 @@ bool SteamNetworkingWrapper::GetP2PSessionState(CSteamID steamIDRemote, P2PSessi
+ bool SteamNetworkingWrapper::AllowP2PPacketRelay(bool bAllow)
+ {
+ 	LOG(7, "SteamNetworkingWrapper AllowP2PPacketRelay\n");
+-	return m_SteamNetworking->AllowP2PPacketRelay(bAllow);
++	const bool result = m_SteamNetworking->AllowP2PPacketRelay(bAllow);
++	NetDiagnosticLastError preserve;
++	if (IsLoggingEnabled() && g_netDiagnostics.AllowEventLog(GetTickCount64()))
++		NETDIAG_LOG("[NETDIAG] event=allow-relay tick=%llu allow=%d result=%d caller=%p", GetTickCount64(), bAllow ? 1 : 0, result ? 1 : 0, _ReturnAddress());
++	return result;
+ }
+ 
+ SNetListenSocket_t SteamNetworkingWrapper::CreateListenSocket(int nVirtualP2PPort, uint32 nIP, uint16 nPort, bool bAllowUseOfPacketRelay)
+diff --git a/src/SteamApiWrapper/SteamNetworkingWrapper.h b/src/SteamApiWrapper/SteamNetworkingWrapper.h
+index 74c21e9..3834e77 100644
+--- a/src/SteamApiWrapper/SteamNetworkingWrapper.h
++++ b/src/SteamApiWrapper/SteamNetworkingWrapper.h
+@@ -12,6 +12,12 @@ public:
+ 
+ 	ISteamNetworking* m_SteamNetworking;
+ 
++	// Existing render/callback paths drive observation; these are not virtual API methods.
++	void DiagnosticFrame();
++	static unsigned long long DiagnosticCallbacksBegin();
++	static void DiagnosticCallbacksEnd(unsigned long long started);
++	static void DiagnosticFailure(CSteamID remote, int error);
++
+ 	bool SendP2PPacket(CSteamID steamIDRemote, const void *pubData, uint32 cubData, EP2PSend eP2PSendType, int nChannel = 0);
+ 	bool IsP2PPacketAvailable(uint32 *pcubMsgSize, int nChannel = 0);
+ 	bool ReadP2PPacket(void *pubDest, uint32 cubDest, uint32 *pcubMsgSize, CSteamID *psteamIDRemote, int nChannel = 0);
