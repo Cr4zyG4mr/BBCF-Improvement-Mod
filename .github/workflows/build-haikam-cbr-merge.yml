@@ -30,7 +30,8 @@ jobs:
             "cbr-auto-save-lifecycle.patch",
             "cbr-versus-final-input.patch",
             "cbr-steamid-probe.patch",
-            "cbr-online-runtime-safety.patch"
+            "cbr-online-runtime-safety.patch",
+            "cbr-online-dormant-branch-fix.patch"
           )
 
           foreach ($patch in $patches) {
