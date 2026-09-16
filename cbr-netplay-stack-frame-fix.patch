@@ -1,0 +1,140 @@
+diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
+--- a/src/Hooks/hooks_cbr_runtime.cpp
++++ b/src/Hooks/hooks_cbr_runtime.cpp
+@@ -30,13 +30,10 @@
+             return false;
+ 
+         const int gameMode = *g_gameVals.pGameMode;
+-        // Online enters the in-match scene during the pre-fight synchronization
+-        // handshake. Do not run CBR logic there. Besides touching half-initialized
+-        // match data, the legacy P2 hook intentionally changes an existing branch.
+-        // Keep BBCF's original path intact until actual gameplay has begun.
+-        if (gameMode == GameMode_Online && *g_gameVals.pMatchState != MatchState_Fight)
+-            return false;
+-
++        // Allow online pre-fight processing once the in-match scene and the
++        // character/entity data below are ready. Netplay helpers now own their
++        // stack frames, so the stack-cookie fix no longer relies on delaying CBR
++        // until MatchState_Fight.
+         if (gameMode != GameMode_Training &&
+             gameMode != GameMode_Versus &&
+             gameMode != GameMode_Online)
+@@ -136,21 +133,13 @@
+         }
+     }
+ 
+-    void __declspec(naked) CbrP1OverwriteNetplayHook()
+-    {
+-        static char* addr = nullptr;
+-        static int playerNum = -1;
+-        static int input = 5;
+-
+-        __asm
+-        {
+-            mov input, eax
+-            mov playerNum, edi
+-            mov [addr], esi
+-            pushfd
+-            pushad
+-        }
+-
++    // Naked hooks inherit BBCF's EBP and have no compiler-owned stack frame.
++    // Keep C++ locals in non-inlined helpers: build #25 emitted [ebp-4]
++    // writes for address and [ebp-1]/[ebp-2] writes for useNetplayMemory.
++    // Those slots belong to the game (including its stack cookie).
++    __declspec(noinline) int __cdecl ProcessCbrNetplayOverwrite(
++        int input, char* addr, int playerNum)
++    {
+         if (IsCbrRuntimeStateReady())
+         {
+             const uintptr_t address = reinterpret_cast<uintptr_t>(addr);
+@@ -161,34 +150,35 @@
+                 input = CBRLogic(input, 6, playerNum, 1, true, true);
+         }
+ 
+-        __asm
+-        {
+-            popad
+-            popfd
+-
+-            // Original bytes, with EAX/EBX carrying the possibly replaced CBR input.
+-            mov eax, input
++        return input;
++    }
++
++    void __declspec(naked) CbrP1OverwriteNetplayHook()
++    {
++        __asm
++        {
++            pushfd
++            pushad
++            push edi
++            push esi
++            push eax
++            call ProcessCbrNetplayOverwrite
++            add esp, 12
++
++            // Replace only saved EAX; POPAD restores the other game registers.
++            mov [esp + 28], eax
++            popad
++            popfd
++
++            // Original instructions, using the possibly replaced packed input.
+             cmp dword ptr [esi + 04h], 00h
+             movzx ebx, ax
+             jmp [g_p1OverwriteNetplayJmpBack]
+         }
+     }
+ 
+-    void __declspec(naked) CbrP2ReadNetplayHook()
+-    {
+-        static int playerNum = -1;
+-        static int input = 5;
+-
+-        __asm
+-        {
+-            // Original input read.
+-            movzx ebx, word ptr [eax + edx * 4 + 00062D8Ch]
+-            mov input, ebx
+-            mov playerNum, edi
+-            pushfd
+-            pushad
+-        }
+-
++    __declspec(noinline) int __cdecl ProcessCbrNetplayRead(int input, int playerNum)
++    {
+         if (IsCbrRuntimeStateReady())
+         {
+             const bool useNetplayMemory =
+@@ -196,11 +186,26 @@
+             input = CBRLogic(input, 0, playerNum, -1, true, false, useNetplayMemory);
+         }
+ 
+-        __asm
+-        {
+-            popad
+-            popfd
+-            mov ebx, input
++        return input;
++    }
++
++    void __declspec(naked) CbrP2ReadNetplayHook()
++    {
++        __asm
++        {
++            // Original input read.
++            movzx ebx, word ptr [eax + edx * 4 + 00062D8Ch]
++            pushfd
++            pushad
++            push edi
++            push ebx
++            call ProcessCbrNetplayRead
++            add esp, 8
++
++            // Replace only saved EBX, the original instruction's destination.
++            mov [esp + 16], eax
++            popad
++            popfd
+             jmp [g_p2ReadNetplayJmpBack]
+         }
+     }
