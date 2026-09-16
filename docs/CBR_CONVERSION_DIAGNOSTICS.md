@@ -48,3 +48,22 @@ Use [Dustloop's BBCF wiki](https://www.dustloop.com/w/BBCF) for player-facing mo
 names, inputs, numpad notation, and mechanics. Verify internal action-name
 mapping separately. Frame data may be outdated; do not infer exact cancel timing
 solely from those values.
+
+## Kagura orb release directions
+
+The reported `ShotA` failures at cleaned samples 1088 and 1790 both release the
+orb with down-forward plus A while facing left. The existing command table
+required exactly `6` after the back charge. It now uses the existing `forward`
+direction group (3/6/9) for both `ShotA` and `ShotB`. Charge length, buttons,
+facing conversion, rollback cleanup, and the general command matcher are unchanged.
+
+[Dustloop's Kagura starter guide](https://www.dustloop.com/w/BBCF/Kagura_Mutsuki/Starter#Input_Tips_&_Tricks)
+explicitly describes charging orbs with 1 and releasing with 3 to retain down
+charge. This fix concerns allowed directions, not frame-data assumptions.
+
+Tests replay the two captured 201-sample input windows and their mirrored
+equivalents. They also cover A/B, both facings, all three back-charge and
+forward-release directions, rejection of insufficient charge/missing buttons/
+non-forward releases, and full conversion equivalence with speculative frames
+over the orb input and action transition. Only anonymous input runs are stored;
+the uploaded player identifiers and full report are not included.

@@ -58,7 +58,110 @@ static void preserved(AnnotatedReplay& replay, const std::vector<int>& inputs) {
     for (const auto& metadata : *replay.getAllMetadata()) assert(metadata->hitMinX == 17);
 }
 
+static bool resolvesOrb(const std::vector<int>& inputs, bool facing, const std::string& action) {
+    CbrReplayFile converter;
+    std::string character = "kg", move = action;
+    auto commands = converter.FetchCommandActions(character);
+    auto pending = converter.MakeInputArray(move, commands, "CmnActStand");
+    assert(!pending.empty());
+    for (auto it = inputs.rbegin(); it != inputs.rend(); ++it)
+        for (int part : converter.DeconstructInput(*it, facing))
+            pending = converter.CheckCommandExecution(part, pending);
+    return pending.empty();
+}
+
+static AnnotatedReplay orbRecording(bool facing, bool rollback, int release, int button) {
+    AnnotatedReplay replay("Test", "kg", "jb", 0, 1);
+    static const Metadata empty;
+    for (int sample = 0; sample < (rollback ? 330 : 320); ++sample) {
+        const int frame = rollback && sample >= 274 ? sample - 10 : sample;
+        auto metadata = std::make_shared<Metadata>(empty);
+        metadata->SetFrameCount(frame);
+        metadata->facing = facing;
+        const bool orb = frame >= 270 && frame < 300;
+        metadata->currentAction = {orb ? (button == 16 ? "ShotA" : "ShotB") : "CmnActStand", "CmnActStand"};
+        metadata->neutral = {!orb, true};
+        int input = 5;
+        if (frame >= 220 && frame <= 264) input = 1; // 45 frames of down-back charge.
+        if (frame >= 265 && frame <= 270) input = release + (frame >= 269 ? button : 0);
+        if (facing) input = replay.inverseInput(input);
+        if (rollback && sample >= 264 && sample < 274) {
+            input = 5;
+            metadata->currentAction[0] = "PredictionDiscarded";
+        }
+        replay.AddFrame(metadata, input);
+    }
+    return replay;
+}
+
+static void testKaguraOrbs() {
+    // Physical input/count runs from the two reported ShotA failures, each
+    // including the 200 preceding samples. No player identity is retained.
+    const std::vector<std::vector<std::pair<int, int>>> captured = {
+        {{5,20},{6,3},{5,2},{6,2},{38,6},{6,2},{70,7},{6,34},{134,11},{6,8},
+         {1,10},{17,3},{1,9},{2,1},{3,22},{131,12},{147,1},{19,5},{3,35},{1,3},{17,5}},
+        {{37,1},{5,23},{37,5},{5,1},{2,9},{34,5},{2,2},{1,2},{4,6},{36,7},
+         {4,2},{1,1},{2,8},{66,6},{2,25},{130,10},{146,3},{24,5},{8,30},
+         {9,8},{25,6},{9,28},{6,4},{2,1},{18,1},{17,2}}
+    };
+    AnnotatedReplay mirror;
+    int unresolved = 0;
+    for (const auto& runs : captured) {
+        std::vector<int> inputs;
+        for (const auto& run : runs) inputs.insert(inputs.end(), run.second, run.first);
+        assert(inputs.size() == 201);
+        unresolved += !resolvesOrb(inputs, true, "ShotA");
+        for (int& input : inputs) input = mirror.inverseInput(input);
+        unresolved += !resolvesOrb(inputs, false, "ShotA");
+    }
+    std::cerr << "Kagura captured/mirrored unresolved motions: " << unresolved << "/4\n";
+    assert(unresolved == 0);
+
+    for (bool facing : {false, true}) {
+        for (int button : {16, 32}) {
+            const std::string action = button == 16 ? "ShotA" : "ShotB";
+            for (int chargeDirection : {1, 4, 7}) {
+                for (int release : {3, 6, 9}) {
+                    std::vector<int> inputs(45, chargeDirection);
+                    inputs.push_back(release + button);
+                    if (facing) for (int& input : inputs) input = mirror.inverseInput(input);
+                    assert(resolvesOrb(inputs, facing, action));
+                    inputs.erase(inputs.begin()); // The fix must still require the charge.
+                    assert(!resolvesOrb(inputs, facing, action));
+                }
+            }
+            for (int release : {1, 2, 4, 5, 7, 8}) {
+                std::vector<int> inputs(45, 4);
+                inputs.push_back(release + button);
+                if (facing) for (int& input : inputs) input = mirror.inverseInput(input);
+                assert(!resolvesOrb(inputs, facing, action));
+            }
+            std::vector<int> missingButton(45, 4);
+            missingButton.push_back(6);
+            if (facing) for (int& input : missingButton) input = mirror.inverseInput(input);
+            assert(!resolvesOrb(missingButton, facing, action));
+            for (int release : {3, 6, 9}) {
+                std::string reference;
+                for (bool rollback : {false, true}) {
+                    auto replay = orbRecording(facing, rollback, release, button);
+                    const auto original = replay.getInput();
+                    CbrReplayFile converted(replay.getCharacterName(), replay.getCharIds());
+                    const auto result = converted.makeFullCaseBase(&replay, "kg");
+                    assert(result.errorCount == 0);
+                    assert(replay.getInput() == original);
+                    assert(result.diagnosticSummary.find(rollback ? "removed=10" : "removed=0") != std::string::npos);
+                    std::ostringstream out;
+                    { boost::archive::text_oarchive writer(out); writer << converted; }
+                    if (!rollback) reference = out.str();
+                    else assert(out.str() == reference);
+                }
+            }
+        }
+    }
+}
+
 int main() {
+    testKaguraOrbs();
     // Exact physical inputs at the three TimelagShot starts in the report.
     const std::vector<std::pair<bool, std::vector<int>>> recordedMotions = {
         {true, {2, 2, 2, 3, 3, 6, 6, 6, 6, 134, 133}},

@@ -1,0 +1,16 @@
+diff --git a/src/CBR/CbrReplayFile.cpp b/src/CBR/CbrReplayFile.cpp
+index 13a06f7..2c766ef 100644
+--- a/src/CBR/CbrReplayFile.cpp
++++ b/src/CBR/CbrReplayFile.cpp
+@@ -1695,8 +1695,9 @@ std::vector<CommandActions> kaguraCommands =
+     { "StandByFDash", {-6,6,-forward,6}},
+     { "StandByBDash", {-4,4,-back,4}},
+     { "StandByBDash", {-4,4,-back,4}},
+-    { "ShotA", {chargeBack45f,6,A}},
+-    { "ShotB", {chargeBack45f,6,B}},
++    // Orbs can release with down-forward, forward, or up-forward (3/6/9).
++    { "ShotA", {chargeBack45f,forward,A}},
++    { "ShotB", {chargeBack45f,forward,B}},
+     { "AntiAirB", {chargeDown45f,up,B}},
+     { "AntiAirC", {chargeDown45f,up,C}},
+     { "AirAssault", {chargeUp20F,down,C}},

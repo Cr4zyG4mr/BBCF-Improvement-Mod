@@ -37,7 +37,8 @@ jobs:
             "cbr-steamid-persistence.patch",
             "cbr-conversion-safety.patch",
             "cbr-conversion-diagnostics.patch",
-            "cbr-network-diagnostics.patch"
+            "cbr-network-diagnostics.patch",
+            "cbr-kagura-orb-directions.patch"
           )
 
           foreach ($patch in $patches) {
