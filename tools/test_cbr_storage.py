@@ -48,7 +48,12 @@ with tempfile.TemporaryDirectory(prefix='cbr-storage-') as folder:
                 command += [f'/DCBR_LEGACY={version}']
             command += [str(repo / 'tools/cbr_storage_test.cpp'), '/Fe:' + str(binary),
                         '/Fo:' + str(headers / 'test.obj'), '/link',
-                        '/LIBPATH:' + str(args.boost_root / 'lib'), 'zlib.lib']
+                        '/LIBPATH:' + str(args.boost_root / 'lib')]
+            # vcpkg's static triplet may call this zlibstatic.lib.
+            zlib_libraries = sorted((args.boost_root / 'lib').glob('zlib*.lib'))
+            if not zlib_libraries:
+                raise RuntimeError('No zlib library found in the vcpkg prefix')
+            command += [str(zlib_libraries[0])]
         else:
             # MSVC accepts this legacy non-const-reference forwarding; GCC does not.
             comparison = headers / 'ComparisonFunction.h'
