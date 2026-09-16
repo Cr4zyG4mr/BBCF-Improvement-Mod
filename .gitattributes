@@ -1,0 +1,2 @@
+# Preserve unified-diff line endings, including no-newline-at-EOF hunks.
+*.patch text eol=lf
