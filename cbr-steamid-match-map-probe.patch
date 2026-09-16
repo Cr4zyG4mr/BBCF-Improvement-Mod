@@ -1,0 +1,252 @@
+diff --git a/src/Network/CbrMatchIdentity.h b/src/Network/CbrMatchIdentity.h
+new file mode 100644
+--- /dev/null
++++ b/src/Network/CbrMatchIdentity.h
+@@ -0,0 +1,89 @@
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++// Copied room data only: resolving identity never reads game memory or Steam.
++struct CbrMatchMember
++{
++    uint64_t steamId = 0;
++    uint32_t matchId = 0;
++    unsigned int roomIndex = 0;
++    unsigned int slot = 0;
++};
++
++struct CbrMatchIdentityResult
++{
++    bool resolved = false;
++    const char* reason = "local-player-missing";
++    std::array<CbrMatchMember, 2> players{};
++};
++
++inline CbrMatchIdentityResult ResolveCbrMatchIdentity(
++    const std::vector<CbrMatchMember>& members, uint64_t localId,
++    bool ranked, bool freeForAll, int ffaLocalSlot)
++{
++    CbrMatchIdentityResult result;
++    const CbrMatchMember* local = nullptr;
++    for (std::size_t i = 0; i < members.size(); ++i)
++    {
++        if (members[i].steamId == 0)
++        {
++            result.reason = "invalid-steamid";
++            return result;
++        }
++        for (std::size_t j = 0; j < i; ++j)
++        {
++            if (members[i].steamId == members[j].steamId)
++            {
++                result.reason = "duplicate-steamid";
++                return result;
++            }
++        }
++        if (members[i].steamId == localId)
++            local = &members[i];
++    }
++    if (!local)
++        return result;
++
++    // Ranked can use a two-person room with matchId zero. Accept that only
++    // with exactly two members and explicit, distinct P1/P2 slots below.
++    if (local->matchId == 0 && (!ranked || members.size() != 2))
++    {
++        result.reason = "match-id-not-ready";
++        return result;
++    }
++    if ((freeForAll && (ffaLocalSlot < 0 || ffaLocalSlot > 1)) ||
++        (!freeForAll && local->slot > 1))
++    {
++        result.reason = "local-side-unresolved-or-spectator";
++        return result;
++    }
++
++    bool occupied[2] = { false, false };
++    for (const CbrMatchMember& member : members)
++    {
++        if (member.matchId != local->matchId)
++            continue;
++        // FFA's side comes from its separate local-side pointer. More than
++        // one other member in this match is ambiguous; never pick the first.
++        const unsigned int slot = freeForAll
++            ? static_cast<unsigned int>(member.steamId == localId ? ffaLocalSlot : 1 - ffaLocalSlot)
++            : member.slot;
++        if (slot > 1)
++            continue;
++        if (occupied[slot])
++        {
++            result.reason = "duplicate-player-slot";
++            return result;
++        }
++        occupied[slot] = true;
++        result.players[slot] = member;
++        result.players[slot].slot = slot;
++    }
++    result.resolved = occupied[0] && occupied[1];
++    result.reason = result.resolved ? "resolved" : "opponent-not-ready";
++    return result;
++}
+diff --git a/src/Network/RoomManager.h b/src/Network/RoomManager.h
+--- a/src/Network/RoomManager.h
++++ b/src/Network/RoomManager.h
+@@ -63,6 +63,9 @@
+ 	std::vector<IMPlayer> GetIMPlayersInCurrentMatchNonSpec() const;
+ 	static RoomSettingsStatic* GetRoomSettingsStaticBaseAdress();
+ 	bool ChangeRematchAmnt(signed int new_amnt);
++	void ResetCbrIdentityProbe();
++	void LogCbrMatchIdentities(const char* phase, const std::string& cbrP1Name,
++		const std::string& cbrP2Name);
+ 
+ private:
+ 	void SendAnnounce();
+@@ -89,6 +92,8 @@
+ 	ISteamFriends* m_pSteamFriends;
+ 	Room* m_pRoom;
+ 	RoomSettingsStatic* m_pRoomSettings;
++	std::string m_cbrIdentityLastReport;
++	std::vector<uint64_t> m_cbrIdentityNameRequests;
+ 
+ 	// For debug purposes
+ 	friend class DebugWindow;
+diff --git a/src/Network/RoomManager.cpp b/src/Network/RoomManager.cpp
+--- a/src/Network/RoomManager.cpp
++++ b/src/Network/RoomManager.cpp
+@@ -1,8 +1,11 @@
+ #include "RoomManager.h"
++#include "CbrMatchIdentity.h"
+ 
+ #include "Core/logger.h"
+ 
+ #include <cstddef>
++#include <algorithm>
++#include <sstream>
+ 
+ 
+ 
+@@ -14,6 +17,85 @@
+ }
+ 
+ RoomManager::~RoomManager() {}
++
++void RoomManager::ResetCbrIdentityProbe()
++{
++	m_cbrIdentityLastReport.clear();
++	m_cbrIdentityNameRequests.clear();
++}
++
++void RoomManager::LogCbrMatchIdentities(const char* phase,
++	const std::string& cbrP1Name, const std::string& cbrP2Name)
++{
++	std::ostringstream report;
++	RoomType roomType = RoomType_Replay;
++	if (!IsRoomFunctional() || !TryGetRoomType(&roomType) || !m_pSteamFriends)
++	{
++		report << "unresolved: room-or-steam-not-ready";
++	}
++	else if (roomType != RoomType_Ranked && roomType != RoomType_MatchSpectate &&
++		roomType != RoomType_Lobby && roomType != RoomType_FFA && roomType != RoomType_Training)
++	{
++		report << "unresolved: unsupported-room-type=" << static_cast<unsigned int>(roomType);
++	}
++	else
++	{
++		std::vector<CbrMatchMember> members;
++		for (unsigned int i = 0; i < MAX_PLAYERS_IN_ROOM; ++i)
++		{
++			const RoomMemberEntry* entry = GetRoomMemberEntryByIndex(static_cast<uint16_t>(i));
++			if (entry)
++				members.push_back({ entry->steamId, entry->matchId, i, entry->matchPlayerIndex });
++		}
++		int ffaLocalSlot = -1;
++		if (roomType == RoomType_FFA && m_pFFAThisPlayerIndex &&
++			!IsBadReadPtr(m_pFFAThisPlayerIndex, sizeof(*m_pFFAThisPlayerIndex)))
++			ffaLocalSlot = *m_pFFAThisPlayerIndex;
++
++		const uint64_t localId = m_thisPlayerSteamID.ConvertToUint64();
++		const auto result = ResolveCbrMatchIdentity(members, localId,
++			roomType == RoomType_Ranked, roomType == RoomType_FFA, ffaLocalSlot);
++		report << "roomType=" << static_cast<unsigned int>(roomType)
++			<< " local=" << localId << " status=" << result.reason;
++		if (result.resolved)
++		{
++			for (unsigned int slot = 0; slot < 2; ++slot)
++			{
++				const auto& player = result.players[slot];
++				const bool isLocal = player.steamId == localId;
++				const char* name = isLocal ? m_pSteamFriends->GetPersonaName()
++					: m_pSteamFriends->GetFriendPersonaName(CSteamID(player.steamId));
++				const bool namePending = !name || !*name || std::string(name) == "[unknown]";
++				if (namePending && !isLocal &&
++					std::find(m_cbrIdentityNameRequests.begin(), m_cbrIdentityNameRequests.end(), player.steamId)
++					== m_cbrIdentityNameRequests.end())
++				{
++					m_cbrIdentityNameRequests.push_back(player.steamId);
++					m_pSteamFriends->RequestUserInformation(CSteamID(player.steamId), true);
++				}
++				// Steam names are metadata. Never use equality with CBR's sanitized
++				// name to assign a side or pick between duplicate display names.
++				report << " | P" << slot + 1 << " steamid=" << player.steamId
++					<< " local=" << isLocal << " member=" << player.roomIndex
++					<< " match=" << player.matchId << " steamName='" << (namePending ? "<pending>" : name)
++					<< "' cbrName='" << (slot == 0 ? cbrP1Name : cbrP2Name) << "'";
++			}
++		}
++		else
++		{
++			// A raw roster makes an unresolved result useful without guessing an ID.
++			for (const auto& member : members)
++				report << " | member=" << member.roomIndex << " steamid=" << member.steamId
++					<< " match=" << member.matchId << " rawSlot=" << member.slot;
++		}
++	}
++	const std::string text = report.str();
++	if (text != m_cbrIdentityLastReport)
++	{
++		m_cbrIdentityLastReport = text;
++		ForceLog("[CBR-ID-MAP] phase=%s %s", phase, text.c_str());
++	}
++}
+ 
+ void RoomManager::SendAnnounce()
+ {
+diff --git a/src/Game/MatchState.cpp b/src/Game/MatchState.cpp
+--- a/src/Game/MatchState.cpp
++++ b/src/Game/MatchState.cpp
+@@ -98,6 +98,15 @@
+ 		}
+ 	}
+ 
++	// Identity diagnostics use a normal C++ lifecycle, never a naked input hook.
++	if (g_interfaces.pRoomManager && g_gameVals.pGameMode && g_gameVals.pGameState &&
++		*g_gameVals.pGameMode == GameMode_Online && *g_gameVals.pGameState == GameState_InMatch)
++	{
++		g_interfaces.pRoomManager->ResetCbrIdentityProbe();
++		g_interfaces.pRoomManager->LogCbrMatchIdentities("match-init",
++			g_interfaces.cbrInterface.nameP1, g_interfaces.cbrInterface.nameP2);
++	}
++
+ 	const bool paletteManagerReady = ManagerReady(
+ 		g_interfaces.pPaletteManager, "pPaletteManager", g_loggedMissingPaletteManager);
+ 	if (paletteManagerReady)
+@@ -291,6 +300,15 @@
+ {
+ 	LOG(7, "MatchState::OnIntroPlaying\n");
+ 
++	// Sample again after initialization so a delayed roster/name can resolve.
++	// RoomManager suppresses unchanged reports; unresolved mappings stay explicit.
++	if (g_interfaces.pRoomManager && g_gameVals.pGameMode && g_gameVals.pGameState &&
++		*g_gameVals.pGameMode == GameMode_Online && *g_gameVals.pGameState == GameState_InMatch)
++	{
++		g_interfaces.pRoomManager->LogCbrMatchIdentities("intro",
++			g_interfaces.cbrInterface.nameP1, g_interfaces.cbrInterface.nameP2);
++	}
++
+ 	if (*g_gameVals.pGameMode == GameMode_ReplayTheater) {
+ 		WindowManager::GetInstance().GetWindowContainer()->GetWindow<ReplayRewindWindow>(WindowType_ReplayRewind)->Open();
+ 	}

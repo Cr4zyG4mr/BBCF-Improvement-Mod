@@ -32,7 +32,8 @@ jobs:
             "cbr-steamid-probe.patch",
             "cbr-online-runtime-safety.patch",
             "cbr-online-dormant-branch-fix.patch",
-            "cbr-netplay-stack-frame-fix.patch"
+            "cbr-netplay-stack-frame-fix.patch",
+            "cbr-steamid-match-map-probe.patch"
           )
 
           foreach ($patch in $patches) {
