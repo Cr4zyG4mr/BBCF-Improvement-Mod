@@ -1,0 +1,1401 @@
+diff --git a/src/CBR/AnnotatedReplay.cpp b/src/CBR/AnnotatedReplay.cpp
+index d11ae20..988490c 100644
+--- a/src/CBR/AnnotatedReplay.cpp
++++ b/src/CBR/AnnotatedReplay.cpp
+@@ -11,7 +11,7 @@ AnnotatedReplay::AnnotatedReplay()
+     replayIndex = 0;
+ }
+ 
+-AnnotatedReplay::AnnotatedReplay( std::string n, std::string p1, std::string p2, int p1Id, int p2Id) : playerName(n)
++AnnotatedReplay::AnnotatedReplay( std::string n, std::string p1, std::string p2, int p1Id, int p2Id, uint64_t id) : playerName(n), steamId(id)
+ {
+     characterName[0] = p1;
+     characterName[1] = p2;
+diff --git a/src/CBR/AnnotatedReplay.h b/src/CBR/AnnotatedReplay.h
+index b58c238..ab4f922 100644
+--- a/src/CBR/AnnotatedReplay.h
++++ b/src/CBR/AnnotatedReplay.h
+@@ -4,6 +4,8 @@
+ #include <boost/serialization/vector.hpp>
+ #include <boost/serialization/array.hpp>
+ #include "Metadata.h"
++#include <cstdint>
++#include <boost/serialization/version.hpp>
+ class AnnotatedReplay {
+ private:
+     friend class boost::serialization::access;
+@@ -14,6 +16,7 @@ private:
+     std::array< std::string, 2> characterName = {};
+     std::array<int, 2> characterId = {};
+     bool playing = false;
++    uint64_t steamId = 0;
+ 
+ 
+ public:
+@@ -22,9 +25,11 @@ public:
+     template<class Archive>
+     void serialize(Archive& a, const unsigned version) {
+         a& playerName& characterName& metaData& input & characterId;
++        if (version >= 1) a & steamId;
++        else if (Archive::is_loading::value) steamId = 0;
+     }
+     AnnotatedReplay();
+-    AnnotatedReplay::AnnotatedReplay(std::string n, std::string p1, std::string p2, int p1Id, int p2Id);
++    AnnotatedReplay::AnnotatedReplay(std::string n, std::string p1, std::string p2, int p1Id, int p2Id, uint64_t id = 0);
+     void AddFrame(std::shared_ptr<Metadata>, int);
+     std::vector<int> getInput();
+     std::vector<int>* AnnotatedReplay::getInputPtr();
+@@ -36,6 +41,7 @@ public:
+     Metadata ViewMetadata(int);
+     int AnnotatedReplay::MetadataSize();
+ 
++    uint64_t getSteamId() const { return steamId; }
+     std::string getPlayerName();
+     std::string getFocusCharName();
+     std::array< std::string, 2>& getCharacterName();
+@@ -48,3 +54,5 @@ public:
+     std::array<int, 2> getCharIds();
+     
+ };
++
++BOOST_CLASS_VERSION(AnnotatedReplay, 1)
+diff --git a/src/CBR/CbrArchive.h b/src/CBR/CbrArchive.h
+new file mode 100644
+index 0000000..9946437
+--- /dev/null
++++ b/src/CBR/CbrArchive.h
+@@ -0,0 +1,51 @@
++#pragma once
++#include <fstream>
++#include <stdexcept>
++#include <string>
++#include <cstdio>
++#include <mutex>
++#include <boost/archive/binary_oarchive.hpp>
++#include <boost/iostreams/filter/gzip.hpp>
++#include <boost/iostreams/filtering_stream.hpp>
++#ifdef _WIN32
++#include <Windows.h>
++#endif
++
++inline std::mutex& CbrStorageMutex() {
++    static std::mutex mutex;
++    return mutex;
++}
++
++// Finish and close the entire gzip stream before replacing an existing save.
++// The temporary file is in the destination directory (same filesystem).
++template<class T>
++void WriteCbrArchiveAtomic(const std::string& path, const T& data)
++{
++    const auto temporary = path + ".tmp";
++    try {
++        std::ofstream output;
++        output.exceptions(std::ios::failbit | std::ios::badbit);
++        output.open(temporary, std::ios::binary | std::ios::trunc);
++        {
++            boost::iostreams::filtering_ostream compressed;
++            compressed.push(boost::iostreams::gzip_compressor(
++                boost::iostreams::gzip_params(boost::iostreams::gzip::best_compression)));
++            compressed.push(output);
++            {
++                boost::archive::binary_oarchive archive(compressed);
++                archive << data;
++            }
++            compressed.reset();
++        }
++        output.close();
++#ifdef _WIN32
++        if (!MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
++#else
++        if (std::rename(temporary.c_str(), path.c_str()) != 0)
++#endif
++            throw std::runtime_error("Cannot replace CBR file: " + path);
++    } catch (...) {
++        std::remove(temporary.c_str());
++        throw;
++    }
++}
+diff --git a/src/CBR/CbrData.cpp b/src/CBR/CbrData.cpp
+index e6a7837..338d69f 100644
+--- a/src/CBR/CbrData.cpp
++++ b/src/CBR/CbrData.cpp
+@@ -26,7 +26,7 @@ CbrData::CbrData()
+     initalizeCosts(costs);
+ }
+ 
+-CbrData::CbrData(std::string n, std::string p1, int charId) :playerName(n), characterName(p1)
++CbrData::CbrData(std::string n, std::string p1, int charId, uint64_t id) :playerName(n), characterName(p1), steamId(id)
+ {
+     characterIndex = charId;
+     replayFiles = {};
+diff --git a/src/CBR/CbrData.h b/src/CBR/CbrData.h
+index babf7e4..02dac84 100644
+--- a/src/CBR/CbrData.h
++++ b/src/CBR/CbrData.h
+@@ -4,6 +4,8 @@
+ #include <boost/serialization/vector.hpp>
+ #include <unordered_map>
+ #include "Metadata.h"
++#include <cstdint>
++#include <boost/serialization/version.hpp>
+ #include "CbrReplayFile.h"
+ #include <utility>  // std::forward
+ #include "ComparisonFunction.h"
+@@ -15,6 +17,7 @@ private:
+ 
+     CbrSearchTree Searchtree;
+     std::string playerName;
++    uint64_t steamId = 0;
+     std::string characterName;
+     int characterIndex = -1;
+ 
+@@ -42,22 +45,17 @@ public:
+     std::vector<std::string> debugTextArr = {};
+     template<class Archive>
+     void serialize(Archive& a, const unsigned version) {
+-        switch (version) {
+-        case 0:
+-            a& playerName& characterName& replayFiles& activeReplay& activeCase& activeFrame& invertCurCase& enabled;
+-            break;
+-        case 3:
+-            a & playerName & characterName & replayFiles & activeReplay & activeCase & activeFrame & invertCurCase & enabled & Searchtree;
+-            break;
+-        default:
+-            a& playerName& characterName& replayFiles& activeReplay& activeCase& activeFrame& invertCurCase& enabled;
+-            break;
+-        }
+-        }
++        a & playerName & characterName & replayFiles & activeReplay & activeCase & activeFrame & invertCurCase & enabled;
++        if (version >= 3) a & Searchtree;
++        if (version >= 4) a & steamId;
++        else if (Archive::is_loading::value) steamId = 0;
++    }
+     CbrData();
+     //player name,  characterName
+-    CbrData::CbrData(std::string n, std::string p1, int charId);
++    CbrData::CbrData(std::string n, std::string p1, int charId, uint64_t id = 0);
+     
++    uint64_t getSteamId() const { return steamId; }
++    void setSteamId(uint64_t id) { steamId = id; }
+     std::string getCharName();
+     void setCharName(std::string);
+     std::string getPlayerName();
+@@ -102,4 +100,4 @@ public:
+     void CbrData::generateTreeFromOldReplay();
+     void CbrData::generateTreeFromOldReplayInRange(int start, int end);
+ };
+-BOOST_CLASS_VERSION(CbrData, 3)
+\ No newline at end of file
++BOOST_CLASS_VERSION(CbrData, 4)
+\ No newline at end of file
+diff --git a/src/CBR/CbrFileIO.h b/src/CBR/CbrFileIO.h
+new file mode 100644
+index 0000000..a2ba04f
+--- /dev/null
++++ b/src/CBR/CbrFileIO.h
+@@ -0,0 +1,32 @@
++#pragma once
++#include "CbrData.h"
++#include "CbrFileMetadata.h"
++#include "CbrArchive.h"
++#include <boost/archive/binary_iarchive.hpp>
++
++// Both historic layouts are supported: CbrData alone, or the four-field
++// metadata prefix followed by CbrData. Class versions handle the ID field.
++inline CbrData ReadCbrDataArchive(const std::string& filename)
++{
++    try {
++        std::ifstream input(filename, std::ios::binary);
++        boost::iostreams::filtering_istream compressed;
++        compressed.push(boost::iostreams::gzip_decompressor());
++        compressed.push(input);
++        boost::archive::binary_iarchive archive(compressed);
++        CbrData data;
++        archive >> data;
++        return data;
++    } catch (const std::exception&) {
++        std::ifstream input(filename, std::ios::binary);
++        boost::iostreams::filtering_istream compressed;
++        compressed.push(boost::iostreams::gzip_decompressor());
++        compressed.push(input);
++        boost::archive::binary_iarchive archive(compressed);
++        std::string character, player, opponents;
++        int count = 0;
++        CbrData data;
++        archive >> character >> player >> opponents >> count >> data;
++        return data;
++    }
++}
+diff --git a/src/CBR/CbrFileMetadata.h b/src/CBR/CbrFileMetadata.h
+new file mode 100644
+index 0000000..69d4b38
+--- /dev/null
++++ b/src/CBR/CbrFileMetadata.h
+@@ -0,0 +1,27 @@
++#pragma once
++#include <cstdint>
++#include <string>
++#include <boost/serialization/access.hpp>
++#include <boost/serialization/string.hpp>
++#include <boost/serialization/array.hpp>
++#include <boost/serialization/version.hpp>
++
++struct FileMetadata {
++    char charName[100]{};
++    char playerName[100]{};
++    char opponentChar[300]{};
++    int rCount = 0;
++    uint64_t steamId = 0;
++    std::string displayName;
++
++    template<class Archive>
++    void serialize(Archive& a, const unsigned version) {
++        a & charName & playerName & opponentChar & rCount;
++        if (version >= 1) a & steamId & displayName;
++        else if (Archive::is_loading::value) {
++            steamId = 0;
++            displayName = playerName;
++        }
++    }
++};
++BOOST_CLASS_VERSION(FileMetadata, 1)
+diff --git a/src/CBR/CbrIdentity.h b/src/CBR/CbrIdentity.h
+new file mode 100644
+index 0000000..2401d33
+--- /dev/null
++++ b/src/CBR/CbrIdentity.h
+@@ -0,0 +1,17 @@
++#pragma once
++#include <cstdint>
++#include <string>
++
++// A name is only an identity for legacy/offline data. Never match an unknown
++// identity to a Steam account just because their display names are equal.
++inline bool SameCbrIdentity(uint64_t a, const std::string& aName,
++    uint64_t b, const std::string& bName)
++{
++    return a == b && (a != 0 || aName == bName);
++}
++
++inline std::string CbrFileStem(const std::string& character,
++    const std::string& name, uint64_t steamId)
++{
++    return character + (steamId ? "__steam_" + std::to_string(steamId) : name);
++}
+diff --git a/src/CBR/CbrInterface.cpp b/src/CBR/CbrInterface.cpp
+index 151ddd6..c1a448b 100644
+--- a/src/CBR/CbrInterface.cpp
++++ b/src/CBR/CbrInterface.cpp
+@@ -1,5 +1,9 @@
+ #include <fstream>
+ #include "CbrInterface.h"
++#include "CbrIdentity.h"
++#include "CbrFileIO.h"
++#include "Core/logger.h"
++#include <mutex>
+ #include <boost/archive/text_iarchive.hpp>
+ #include <boost/archive/text_oarchive.hpp>
+ #include <boost/serialization/vector.hpp>
+@@ -62,6 +66,12 @@ void CbrInterface::setCbrData(CbrData c, int i) {
+ 	cbrData[i] = c;
+ }
+ void CbrInterface::mergeCbrData(CbrData c, int i) {
++    if (cbrData[i].getReplayCount() > 0 && cbrData[i].getSteamId() != c.getSteamId()) {
++        storageError = "Cannot merge recordings with different SteamIDs, or identified and legacy data.";
++        ForceLog("[CBR-ID] %s", storageError.c_str());
++        return;
++    }
++    storageError.clear();
+ 	auto vec = c.getReplayFiles();
+ 	auto vec2 = cbrData[i].getReplayFiles();
+ 	int start = vec2->size();;
+@@ -191,11 +201,23 @@ void CbrInterface::OnMatchInit(CharData& c1, CharData& c2, int gameMode) {
+ 	nameP1 = "";
+ 	nameP2 = "";
+ 	if (gameMode == 15) {//Gamemodeonline
+-		SetPlayerNames();
++        SetPlayerNames();
++        std::array<uint64_t, 2> ids{};
++        std::array<std::string, 2> steamNames{};
++        if (g_interfaces.pRoomManager &&
++            g_interfaces.pRoomManager->GetCbrMatchPlayers(ids, steamNames, localSteamId)) {
++            if (!steamNames[0].empty()) nameP1 = steamNames[0];
++            if (!steamNames[1].empty()) nameP2 = steamNames[1];
++            if (nameP1.empty()) nameP1 = "Steam_" + std::to_string(ids[0]);
++            if (nameP2.empty()) nameP2 = "Steam_" + std::to_string(ids[1]);
++            ForceLog("[CBR-ID] Recording snapshot P1=%llu P2=%llu", ids[0], ids[1]);
++        } else {
++            ForceLog("[CBR-ID] Recording without resolved identities; keeping name-only data separate.");
++        }
+ 		if ((autoRecordGameOwner || autoRecordAllOtherPlayers) && nameP1 != "" && nameP2 != "") {
+ 			autoRecordActive = true;
+-			setAnnotatedReplay(AnnotatedReplay(nameP1, c1.char_abbr, c2.char_abbr, c1.charIndex, c2.charIndex), 0);
+-			setAnnotatedReplay(AnnotatedReplay(nameP2, c2.char_abbr, c1.char_abbr, c2.charIndex, c1.charIndex), 1);
++			setAnnotatedReplay(AnnotatedReplay(nameP1, c1.char_abbr, c2.char_abbr, c1.charIndex, c2.charIndex, ids[0]), 0);
++			setAnnotatedReplay(AnnotatedReplay(nameP2, c2.char_abbr, c1.char_abbr, c2.charIndex, c1.charIndex, ids[1]), 1);
+ 		}
+ 	}
+ 	if (gameMode == 5) {//gamemodeVersus
+@@ -210,57 +232,7 @@ void CbrInterface::OnMatchInit(CharData& c1, CharData& c2, int gameMode) {
+ 
+ bool SaveDataComplete = false;
+ void CbrInterface::SaveCbrData(CbrData& cbr) {
+-
+-	boost::filesystem::path dir("CBRsave");
+-	if (!(boost::filesystem::exists(dir))) {
+-		boost::filesystem::create_directory(dir);
+-	}
+-	
+-	auto filenameReal = u8".\\CBRsave\\" + cbr.getCharName() + cbr.getPlayerName() + ".cbr";
+-	auto filename = u8".\\CBRsave\\SaveBuffer.cbr";
+-	
+-
+-	auto opponentChar = getOpponentCharNameString(cbr);
+-
+-	 {
+-		std::ofstream outfile(filename, std::ios_base::binary);
+-		boost::iostreams::filtering_stream<boost::iostreams::output> f;
+-		f.push(boost::iostreams::gzip_compressor(boost::iostreams::gzip_params(boost::iostreams::gzip::best_compression)));
+-		f.push(outfile);
+-		boost::archive::binary_oarchive archive(f);
+-		std::string charName = cbr.getCharName();
+-		std::string playerName = cbr.getPlayerName();
+-		//std::string opponentChar = "all";
+-		int rCount = cbr.getReplayCount();
+-		archive << charName;
+-		archive << playerName;
+-		archive << opponentChar;
+-		archive << rCount;
+-		archive << cbr;
+-		
+-	}
+-	
+-	 auto filenameReal2 = "\\CBRsave\\" + cbr.getCharName() + cbr.getPlayerName() + ".cbr";
+-	 auto filename2 = "\\CBRsave\\SaveBuffer.cbr";
+-	 auto p = boost::filesystem::current_path() / filename2;
+-	 auto pReal = boost::filesystem::current_path() / filenameReal2;
+-	 
+-	 if (boost::filesystem::exists(pReal)) {
+-		 boost::filesystem::remove(pReal);
+-	 }
+-	 if (boost::filesystem::exists(p)) {
+-		 try
+-		 {
+-			 boost::filesystem::rename(p, pReal);
+-		 }
+-		 catch (const std::exception& e)
+-		 {
+-			 std::string s = "reversalName";
+-		 }
+-		 
+-	 }
+-	 SaveDataComplete = true;
+-	 
++    SaveCbrDataExperiment(cbr);
+ }
+ 
+ 
+@@ -287,97 +259,47 @@ void SaveDataWithMetadata(const std::string& filename, const std::string& metada
+ 
+ 
+ 
+-void CbrInterface::SaveCbrDataExperiment(CbrData& cbr) {
+-
+-	boost::filesystem::path dir("CBRsave");
+-	if (!(boost::filesystem::exists(dir))) {
+-		boost::filesystem::create_directory(dir);
+-	}
+-
+-	boost::filesystem::path dir2("CBRsave\\Metadata");
+-	if (!(boost::filesystem::exists(dir2))) {
+-		boost::filesystem::create_directory(dir2);
+-	}
+-
+-	auto filenameReal = u8".\\CBRsave\\" + cbr.getCharName() + cbr.getPlayerName() + ".cbr";
+-	auto filename = u8".\\CBRsave\\SaveBuffer.cbr";
+-	auto filenameMeta = u8".\\CBRsave\\Metadata\\SaveBuffer.met";
+-
+-	// Serialize metadata to a string
+-	std::ostringstream metadataStream;
+-	{
+-		FileMetadata meta;
+-		auto opponentChar = getOpponentCharNameString(cbr);
+-		std::string charName = cbr.getCharName();
+-		std::string playerName = cbr.getPlayerName();
+-		int rCount = cbr.getReplayCount();
+-		meta.rCount = rCount;
+-		strcpy(meta.charName, charName.c_str());
+-		strcpy(meta.playerName, playerName.c_str());
+-		strcpy(meta.opponentChar, opponentChar.c_str());
+-		meta.rCount = rCount;
+-
+-		std::ofstream outfile(filenameMeta, std::ios_base::binary);
+-		boost::iostreams::filtering_stream<boost::iostreams::output> f;
+-		f.push(boost::iostreams::gzip_compressor(boost::iostreams::gzip_params(boost::iostreams::gzip::best_compression)));
+-		f.push(outfile);
+-		boost::archive::binary_oarchive archive(f);
+-		archive << meta;
+-	}
+-
+-	{
+-		std::ofstream outfile(filename, std::ios_base::binary);
+-		boost::iostreams::filtering_stream<boost::iostreams::output> f;
+-		f.push(boost::iostreams::gzip_compressor(boost::iostreams::gzip_params(boost::iostreams::gzip::best_compression)));
+-		f.push(outfile);
+-		boost::archive::binary_oarchive archive(f);
+-		archive << cbr;
+-
+-
+-	}
+-	auto filenameReal2Meta = "\\CBRsave\\Metadata\\" + cbr.getCharName() + cbr.getPlayerName() + ".met";
+-	auto filenameReal2 = "\\CBRsave\\" + cbr.getCharName() + cbr.getPlayerName() + ".cbr";
+-	auto filename2 = "\\CBRsave\\SaveBuffer.cbr";
+-	auto filename2Meta = "\\CBRsave\\Metadata\\SaveBuffer.met";
+-	auto p = boost::filesystem::current_path() / filename2;
+-	auto pReal = boost::filesystem::current_path() / filenameReal2;
+-	auto pMeta = boost::filesystem::current_path() / filename2Meta;
+-	auto pMetaReal = boost::filesystem::current_path() / filenameReal2Meta;
+-
+-	if (boost::filesystem::exists(pReal)) {
+-		boost::filesystem::remove(pReal);
+-
+-	}
+-	if (boost::filesystem::exists(pMetaReal)) {
+-		boost::filesystem::remove(pMetaReal);
+-	}
+-	if (boost::filesystem::exists(p)) {
+-		try
+-		{
+-			boost::filesystem::rename(p, pReal);
+-
+-		}
+-		catch (const std::exception& e)
+-		{
+-			std::string s = "reversalName";
+-		}
+-
+-	}
+-	if (boost::filesystem::exists(pMeta)) {
+-		try
+-		{
+-			boost::filesystem::rename(pMeta, pMetaReal);
+-
+-		}
+-		catch (const std::exception& e)
+-		{
+-			std::string s = "reversalName";
+-		}
+-
+-	}
+-	SaveDataComplete = true;
+-
++bool CbrInterface::SaveCbrDataExperiment(CbrData& cbr) {
++    // Serialize writers, including manual saves and server downloads.
++    std::lock_guard<std::mutex> lock(CbrStorageMutex());
++    storageError.clear();
++    try {
++        boost::filesystem::create_directories("CBRsave\\Metadata");
++        const auto filename = makeFilenameCbr(cbr.getPlayerName(), cbr.getCharName(), cbr.getSteamId());
++        if (boost::filesystem::exists(filename)) {
++            auto previous = LoadCbrDataNoThread(filename);
++            if (previous.getSteamId() != cbr.getSteamId())
++                throw std::runtime_error("Destination belongs to a different or unknown SteamID; existing data was preserved.");
++        }
++        const auto metadataPath = metaDataFilepathRename(filename);
++        // Metadata is a rebuildable cache. Invalidate it before committing data
++        // so an interrupted update cannot leave the old owner's label behind.
++        boost::filesystem::remove(metadataPath);
++        WriteCbrArchiveAtomic(filename, cbr);
++        try {
++            FileMetadata meta;
++            strncpy_s(meta.charName, cbr.getCharName().c_str(), _TRUNCATE);
++            strncpy_s(meta.playerName, cbr.getPlayerName().c_str(), _TRUNCATE);
++            strncpy_s(meta.opponentChar, getOpponentCharNameString(cbr).c_str(), _TRUNCATE);
++            meta.rCount = cbr.getReplayCount();
++            meta.steamId = cbr.getSteamId();
++            meta.displayName = cbr.getPlayerName();
++            WriteCbrArchiveAtomic(metadataPath, meta);
++        } catch (const std::exception& e) {
++            ForceLog("[CBR-ID] Data saved; metadata will be rebuilt: %s", e.what());
++        }
++        ForceLog("[CBR-ID] Saved steamid=%llu name='%s' replays=%d path='%s'",
++            cbr.getSteamId(), cbr.getPlayerName().c_str(), cbr.getReplayCount(), filename.c_str());
++        SaveDataComplete = true;
++        return true;
++    } catch (const std::exception& e) {
++        storageError = e.what();
++        ForceLog("[CBR-ID] Save failed: %s", storageError.c_str());
++        SaveDataComplete = true;
++        return false;
++    }
+ }
++
+ /*
+ void CbrInterface::SaveCbrDataExperiment(CbrData& cbr) {
+ 
+@@ -651,7 +573,7 @@ bool LoadNDeleteCbrDataComplete = false;
+ void CbrInterface::LoadnDeleteCbrDataExec(std::vector<std::string>& filename, bool upload, int deleteAmount) {
+ 	for (int i = 0; i < filename.size(); i++) {
+ 		auto insert = LoadCbrDataNoThread(filename[i]);
+-		if (insert.getPlayerName() == "-1") {
++		if (!boost::filesystem::exists(filename[i])) {
+ 			LoadNDeleteCbrDataComplete = true;
+ 			return;
+ 		}
+@@ -669,64 +591,22 @@ void CbrInterface::LoadnDeleteCbrDataExec(std::vector<std::string>& filename, bo
+ 	LoadNDeleteCbrDataComplete = true;
+ }
+ 
+-CbrData CbrInterface::LoadCbrDataNoThread(std::string playerName, std::string characterName) {
+-	std::string filename = makeFilenameCbr(playerName, characterName);
+-	return LoadCbrDataNoThread(filename);
++CbrData CbrInterface::LoadCbrDataNoThread(std::string playerName, std::string characterName, uint64_t steamId) {
++    const auto filename = makeFilenameCbr(playerName, characterName, steamId);
++    auto data = LoadCbrDataNoThread(filename);
++    if (boost::filesystem::exists(filename) &&
++        (data.getSteamId() != steamId || data.getCharName() != characterName))
++        throw std::runtime_error("CBR file identity does not match its destination; existing data was preserved.");
++    return data;
+ }
+ 
+ CbrData CbrInterface::LoadCbrDataNoThread(std::string filename) {
+-	CbrData insert;
+-	FileMetadata meta;
+-	insert.setPlayerName("-1");
+-	auto filenameMeta = filename.substr(0, filename.size() - 3) +"met";
+-
+-	std::ifstream infile(filename, std::ios_base::binary);
+-	if (infile.fail()) {
+-		std::cerr << "Error: Could not open the file.\n";
+-		return insert;
+-	}
+-
+-	// Read metadata
+-	try
+-	{
+-
+-		//std::ifstream infile2(filenameMeta, std::ios_base::binary);
+-		//boost::iostreams::filtering_stream<boost::iostreams::input> f;
+-		//f.push(boost::iostreams::gzip_decompressor());
+-		//f.push(infile2);
+-		//boost::archive::binary_iarchive archive(f);
+-		//archive >> meta;
+-
+-		boost::iostreams::filtering_stream<boost::iostreams::input> f2;
+-		f2.push(boost::iostreams::gzip_decompressor());
+-		f2.push(infile);
+-		boost::archive::binary_iarchive archive2(f2);
+-		CbrData insert;
+-		archive2 >> insert;
+-		return insert;
+-	}
+-	catch (const std::exception&)
+-	{
+-		std::ifstream infile2(filename, std::ios_base::binary);
+-		boost::iostreams::filtering_stream<boost::iostreams::input> f;
+-		f.push(boost::iostreams::gzip_decompressor());
+-		f.push(infile2);
+-		boost::archive::binary_iarchive archive(f);
+-		CbrData insert;
+-		std::string charName = "";
+-		std::string playerName = "";
+-		std::string opponentChar = "";
+-		int rCount = 0;
+-		archive >> charName;
+-		archive >> playerName;
+-		archive >> opponentChar;
+-		archive >> rCount;
+-		archive >> insert;
+-		return insert;
+-	}
+-	
+-
+-	return insert;
++    if (!boost::filesystem::exists(filename)) {
++        CbrData missing;
++        missing.setPlayerName("-1");
++        return missing;
++    }
++    return ReadCbrDataArchive(filename);
+ }
+ 
+ /*CbrData CbrInterface::LoadCbrDataNoThread(std::string filename) {
+@@ -735,6 +615,7 @@ CbrData CbrInterface::LoadCbrDataNoThread(std::string filename) {
+ 
+ 	std::ifstream infile(filename, std::ios_base::binary);
+ 	if (infile.fail()) {
++        if (boost::filesystem::exists(filename)) throw std::runtime_error("Cannot read existing CBR file: " + filename);
+ 		std::cerr << "Error: Could not open the file.\n";
+ 		return insert;
+ 	}
+@@ -800,10 +681,8 @@ CbrData CbrInterface::LoadCbrDataNoThread(std::string filename) {
+ 	return insert;
+ }*/
+ 
+-std::string CbrInterface::makeFilenameCbr(std::string playerName, std::string characterName) {
+-	std::string filename = "CBRsave\\";
+-	filename = filename +  characterName + playerName  + ".cbr";
+-	return filename;
++std::string CbrInterface::makeFilenameCbr(std::string playerName, std::string characterName, uint64_t steamId) {
++    return "CBRsave\\" + CbrFileStem(characterName, playerName, steamId) + ".cbr";
+ }
+ 
+ 
+@@ -927,22 +806,25 @@ void CbrInterface::clearThreads() {
+ }
+ 
+ void CbrInterface::mergeCbrReplayBuffer(bool checkSkip = false) {
+-	/*if (!checkSkip && processingCBRdata) { return; }
+-	if (recordBufferP1Backup.size() > 0) {
+-		recordBufferP1.insert(recordBufferP1.end(), recordBufferP1Backup.begin(), recordBufferP1Backup.end());
+-	}
+-	if (recordBufferP2Backup.size() > 0) {
+-		recordBufferP2.insert(recordBufferP2.end(), recordBufferP2Backup.begin(), recordBufferP2Backup.end());
+-	}*/
++    if (processingCBRdata || threadActive) return;
++    if (processingStoredRecordingsThread.joinable()) return; // Join first.
++    recordBufferP1.insert(recordBufferP1.end(),
++        std::make_move_iterator(recordBufferP1Backup.begin()), std::make_move_iterator(recordBufferP1Backup.end()));
++    recordBufferP2.insert(recordBufferP2.end(),
++        std::make_move_iterator(recordBufferP2Backup.begin()), std::make_move_iterator(recordBufferP2Backup.end()));
++    recordBufferP1Backup.clear();
++    recordBufferP2Backup.clear();
+ }
+ 
+ int CbrInterface::getAutoRecordReplayAmount() {
++    if (processingCBRdata) return savingReplayCount + static_cast<int>(recordBufferP1Backup.size() + recordBufferP2Backup.size());
+ 
+ 	mergeCbrReplayBuffer();
+-	return recordBufferP1.size() + recordBufferP2.size();
++	return recordBufferP1.size() + recordBufferP2.size() + recordBufferP1Backup.size() + recordBufferP2Backup.size();
+ }
+ void CbrInterface::clearAutomaticRecordReplays() {
+ 	if (processingCBRdata) { return; }
++	autoRecordSaveFailed = false;
+ 	mergeCbrReplayBuffer();
+ 	recordBufferP1.clear();
+ 	recordBufferP2.clear();
+@@ -994,14 +876,14 @@ void CbrInterface::EndCbrActivities(int playerNr, bool trim) {
+ 
+ 	if (autoRecordActive == true) {
+ 		auto anReplay = getAnnotatedReplay(0);
+-		auto savedReplay = AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1]);
++		auto savedReplay = AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1], anReplay->getSteamId());
+ 		if (anReplay->getInputSize() >= 600) {
+ 			if (processingCBRdata) { recordBufferP1Backup.push_back(std::move(*anReplay)); }
+ 			else { recordBufferP1.push_back(std::move(*anReplay)); }
+ 		}
+ 		setAnnotatedReplay(savedReplay, 0);
+ 		anReplay = getAnnotatedReplay(1);
+-		savedReplay = AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1]);
++		savedReplay = AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1], anReplay->getSteamId());
+ 		if (anReplay->getInputSize() >= 600) {
+ 			if (processingCBRdata) { recordBufferP2Backup.push_back(std::move(*anReplay)); }
+ 			else { recordBufferP2.push_back(std::move(*anReplay)); }
+@@ -1032,7 +914,7 @@ void CbrInterface::EndCbrActivities(int playerNr, bool trim) {
+ 				cbrCreationDebugStr += err.errorDetail;
+ 				saveDebug();
+ 			}
+-			setAnnotatedReplay(AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1]), 0);
++			setAnnotatedReplay(AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1], anReplay->getSteamId()), 0);
+ 			
+ 		}
+ 		Recording = false;
+@@ -1057,7 +939,7 @@ void CbrInterface::EndCbrActivities(int playerNr, bool trim) {
+ 				cbrCreationDebugStr += err.errorDetail;
+ 				saveDebug();
+ 			}
+-			setAnnotatedReplay(AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1]), 1);
++			setAnnotatedReplay(AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1], anReplay->getSteamId()), 1);
+ 		}
+ 		RecordingP2 = false;
+ 	}
+@@ -1174,7 +1056,14 @@ void CbrInterface::threadSaveReplay(bool save) {
+ 			processingStoredRecordingsThread.join();
+ 			//threadActive = false;
+ 	}
++	mergeCbrReplayBuffer();
++	if (playerID.empty()) playerID = GetPlayerID();
++	autoRecordSaveFailed = false;
++	storageError.clear();
+ 	threadActive = true;
++	savingLocalSteamId = localSteamId;
++	savingReplayCount = static_cast<int>(recordBufferP1.size() + recordBufferP2.size());
++	processingCBRdata = true;
+ 	processingStoredRecordingsThread = boost::thread(&CbrInterface::saveReplayDataInMenu, this);
+ 	}
+ }
+@@ -1186,6 +1075,7 @@ bool CbrInterface::threadCheckSaving() {
+ 	if (!threadActive && processingStoredRecordingsThread.joinable()) {
+ 		processingStoredRecordingsThread.join();
+ 		//threadActive = false;
++		mergeCbrReplayBuffer();
+ 		ret = true;
+ 	}
+ 	return ret;
+@@ -1288,100 +1178,61 @@ void CbrInterface::saveStructureDebug(std::string text) {
+ }
+ 
+ void CbrInterface::saveReplayDataInMenu() {
+-	processingCBRdata = true;
+-	mergeCbrReplayBuffer(true);
+-	auto cbrData = CbrData();
+-	bool ranOnce = false;
+-	std::string charName = "";
+-	std::string playerName = "";
+-	if (playerID == "") {
+-		playerID = GetPlayerID();
+-	}
+-	autoRecordDeletionAmount[0] = 0;
+-	autoRecordDeletionAmount[1] = 0;
+-	for (int i = 0; i < recordBufferP1.size(); ++i) {
+-		auto& anReplay = recordBufferP1[i];
+-		if (i == 0 || charName != anReplay.getFocusCharName() || playerName != anReplay.getPlayerName()) {
+-			charName = anReplay.getFocusCharName();
+-			playerName = anReplay.getPlayerName();
+-			autoRecordSaveCompletedName[0] = playerName;
+-			autoRecordSaveCompletedChar[0] = charName;
+-			if (ranOnce) { 
+-				SaveCbrDataExperiment(cbrData);
+-				if (autoUploadOwnData && cbrData.getPlayerName() == playerID){ CbrHTTPPostNoThreat(convertCBRtoJson(cbrData, playerID)); }
+-				cbrData = CbrData();
+-			}
+-			ranOnce = true;
+-			cbrData = LoadCbrDataNoThread(anReplay.getPlayerName(), anReplay.getCharacterName()[0]);
+-			if (cbrData.getPlayerName() == "-1") {
+-				cbrData = CbrData(anReplay.getPlayerName(), anReplay.getCharacterName()[0], anReplay.getCharIds()[0]);
+-			}
+-		}
+-		auto cbrReplay = CbrReplayFile(anReplay.getCharacterName(), anReplay.getCharIds());
+-		auto err = cbrReplay.makeFullCaseBase(&anReplay, anReplay.getFocusCharName());
+-
+-		if (err.structure != "") { saveStructureDebug(err.structure); }
+-		debugErrorCounter[0] += err.errorCount;
+-		if (err.errorCount == 0) { 
+-			cbrData.AddReplay(cbrReplay); 
+-			autoRecordDeletionAmount[0]++;
+-		}
+-		else {
+-			cbrCreationDebugStr += err.errorDetail;
+-			saveDebug();
+-		}
+-		
+-	}
+-	if(ranOnce){ 
+-		SaveCbrDataExperiment(cbrData);
+-		if (autoUploadOwnData && cbrData.getPlayerName() == playerID) { CbrHTTPPostNoThreat(convertCBRtoJson(cbrData, playerID)); }
+-	}
+-	ranOnce = false;
+-
+-	cbrData = CbrData();
+-	for (int i = 0; i < recordBufferP2.size(); ++i) {
+-		auto& anReplay = recordBufferP2[i];
+-		if (i == 0 || charName != anReplay.getFocusCharName() || playerName != anReplay.getPlayerName()) {
+-			charName = anReplay.getFocusCharName();
+-			playerName = anReplay.getPlayerName();
+-			autoRecordSaveCompletedName[1] = playerName;
+-			autoRecordSaveCompletedChar[1] = charName;
+-			if (ranOnce) { 
+-				SaveCbrDataExperiment(cbrData);
+-				if (autoUploadOwnData && cbrData.getPlayerName() == playerID) { CbrHTTPPostNoThreat(convertCBRtoJson(cbrData, playerID)); }
+-				cbrData = CbrData();
+-			}
+-			ranOnce = true;
+-			cbrData = LoadCbrDataNoThread(anReplay.getPlayerName(), anReplay.getCharacterName()[0]);
+-			if (cbrData.getPlayerName() == "-1") {
+-				cbrData = CbrData(anReplay.getPlayerName(), anReplay.getCharacterName()[0], anReplay.getCharIds()[0]);
+-			}
+-		}
+-		auto cbrReplay = CbrReplayFile(anReplay.getCharacterName(), anReplay.getCharIds());
+-		auto err = cbrReplay.makeFullCaseBase(&anReplay, anReplay.getFocusCharName());
+-		if (err.structure != "") { saveStructureDebug(err.structure); }
+-		debugErrorCounter[1] += err.errorCount;
+-		if (err.errorCount == 0) { 
+-			cbrData.AddReplay(cbrReplay); 
+-			autoRecordDeletionAmount[1]++;
+-		}
+-		else {
+-			cbrCreationDebugStr += err.errorDetail;
+-			saveDebug();
+-		}
+-		
+-	}
+-	if (ranOnce) { 
+-		SaveCbrDataExperiment(cbrData);
+-		if (autoUploadOwnData && cbrData.getPlayerName() == playerID) { CbrHTTPPostNoThreat(convertCBRtoJson(cbrData, playerID)); }
+-	}
+-	ranOnce = false;
+-	recordBufferP1.clear();
+-	recordBufferP2.clear();
+-	autoRecordSaveCompleted = true;
+-	
+-	processingCBRdata = false;
+-	threadActive = false;
++    processingCBRdata = true;
++    autoRecordDeletionAmount = { 0, 0 };
++    try {
++        const auto saveBuffer = [this](std::vector<AnnotatedReplay>& buffer, int slot) {
++            while (!buffer.empty()) {
++                auto& first = buffer.front();
++                const auto id = first.getSteamId();
++                const auto character = first.getFocusCharName();
++                const auto filename = makeFilenameCbr(first.getPlayerName(), character, id);
++                auto data = boost::filesystem::exists(filename)
++                    ? LoadCbrDataNoThread(first.getPlayerName(), character, id)
++                    : CbrData(first.getPlayerName(), character, first.getCharIds()[0], id);
++                size_t count = 0;
++                for (auto& replay : buffer) {
++                    if (replay.getFocusCharName() != character ||
++                        !SameCbrIdentity(id, first.getPlayerName(), replay.getSteamId(), replay.getPlayerName())) break;
++                    auto converted = CbrReplayFile(replay.getCharacterName(), replay.getCharIds());
++                    auto error = converted.makeFullCaseBase(&replay, replay.getFocusCharName());
++                    if (!error.structure.empty()) saveStructureDebug(error.structure);
++                    debugErrorCounter[slot] += error.errorCount;
++                    if (error.errorCount != 0) {
++                        cbrCreationDebugStr += error.errorDetail;
++                        saveDebug();
++                        throw std::runtime_error("CBR conversion failed; pending recordings were retained.");
++                    }
++                    data.AddReplay(converted);
++                    data.setPlayerName(replay.getPlayerName());
++                    ++count;
++                }
++                if (!SaveCbrDataExperiment(data)) throw std::runtime_error(storageError);
++                // Remove only the group actually committed. Retrying after a later
++                // failure must not append these rounds a second time.
++                buffer.erase(buffer.begin(), buffer.begin() + count);
++                savingReplayCount -= static_cast<int>(count);
++                autoRecordDeletionAmount[slot] += static_cast<int>(count);
++                autoRecordSaveCompletedName[slot] = data.getPlayerName();
++                autoRecordSaveCompletedChar[slot] = character;
++                const bool ownData = id ? id == savingLocalSteamId : data.getPlayerName() == playerID;
++                if (autoUploadOwnData && ownData) {
++                    try { CbrHTTPPostNoThreat(convertCBRtoJson(data, playerID)); }
++                    catch (const std::exception& e) { ForceLog("[CBR-ID] Local save succeeded, upload failed: %s", e.what()); }
++                }
++            }
++        };
++        saveBuffer(recordBufferP1, 0);
++        saveBuffer(recordBufferP2, 1);
++        autoRecordSaveCompleted = true;
++    } catch (const std::exception& e) {
++        storageError = e.what();
++        autoRecordSaveFailed = true;
++        autoRecordSaveCompleted = false;
++        ForceLog("[CBR-ID] Buffered save failed: %s", storageError.c_str());
++    }
++    processingCBRdata = false;
++    threadActive = false;
+ }
+ std::string CbrInterface::WriteAiInterfaceState() {
+ 	std::string str = "Ai Activities:";
+@@ -1414,7 +1265,7 @@ void CbrInterface::RestartCbrActivities(char* p1charName, char* p2charName, int
+ 	disableAllReversalReplays();
+ 	if (autoRecordActive == true) {
+ 		auto anReplay = getAnnotatedReplay(0);
+-		auto savedReplay = AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1]);
++		auto savedReplay = AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1], anReplay->getSteamId());
+ 		if (anReplay->getInputSize() >= 600) {
+ 
+ 			if (processingCBRdata) { recordBufferP1Backup.push_back(std::move(*anReplay)); }
+@@ -1422,7 +1273,7 @@ void CbrInterface::RestartCbrActivities(char* p1charName, char* p2charName, int
+ 		}
+ 		setAnnotatedReplay(savedReplay, 0);
+ 		anReplay = getAnnotatedReplay(1);
+-		savedReplay = AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1]);
++		savedReplay = AnnotatedReplay(anReplay->getPlayerName(), anReplay->getCharacterName()[0], anReplay->getCharacterName()[1], anReplay->getCharIds()[0], anReplay->getCharIds()[1], anReplay->getSteamId());
+ 		if (anReplay->getInputSize() >= 600) {
+ 			if (processingCBRdata) { recordBufferP2Backup.push_back(std::move(*anReplay)); }
+ 			else{ recordBufferP2.push_back(std::move(*anReplay)); }
+@@ -1576,7 +1427,7 @@ std::string CbrInterface::GetPlayerID() {
+ 		if (!ReadProcessMemory(GetCurrentProcess(), (BYTE*)p1NamePtr, &playerID, 34, &bytesRead) || bytesRead == 0) {
+ 			return "";
+ 		}
+-		nameP1 = "";
++		std::string localName;
+ 
+ 		for (int i = 0; i < 35; i++) {
+ 			debugPrintText += playerID[i];
+@@ -1584,9 +1435,9 @@ std::string CbrInterface::GetPlayerID() {
+ 		std::string bufferName = "";
+ 		for (int i = 0; i < 35; ++i) {
+ 			if (playerID[i] != 0) {
+-				bufferName = nameP1 + playerID[i];
++				bufferName = localName + playerID[i];
+ 				if (boost::filesystem::windows_name(bufferName)) {
+-					nameP1 += playerID[i];
++					localName += playerID[i];
+ 				}
+ 
+ 			}
+@@ -1597,7 +1448,7 @@ std::string CbrInterface::GetPlayerID() {
+ 			}
+ 
+ 		}
+-		return nameP1;
++		return localName;
+ 	}
+ 	catch (const std::exception&)
+ 	{
+diff --git a/src/CBR/CbrInterface.h b/src/CBR/CbrInterface.h
+index fb02122..b7f6c43 100644
+--- a/src/CBR/CbrInterface.h
++++ b/src/CBR/CbrInterface.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include <deque>
++#include <atomic>
+ #include <CBR/AnnotatedReplay.h>
+ #include <CBR/CbrData.h>
+ #include <Windows.h>
+@@ -50,10 +51,10 @@ public:
+ 
+ 	bool threadCheckSaving();
+ 
+-	std::string CbrInterface::makeFilenameCbr(std::string playerName, std::string characterName);
++	std::string CbrInterface::makeFilenameCbr(std::string playerName, std::string characterName, uint64_t steamId = 0);
+ 	void CbrInterface::clearThreads();
+ 	void CbrInterface::SaveCbrData(CbrData& cbr);
+-	void CbrInterface::SaveCbrDataExperiment(CbrData& cbr);
++	bool CbrInterface::SaveCbrDataExperiment(CbrData& cbr);
+ 	void CbrInterface::SaveCbrDataThreaded(CbrData& cbr, bool run);
+ 	void CbrInterface::LoadCbrData(std::string playerName, std::string characterName, bool run, int playerNr);
+ 	void CbrInterface::LoadCbrData(std::string filename, bool run, int playerNr);
+@@ -61,7 +62,7 @@ public:
+ 	void CbrInterface::LoadnDeleteCbrData(std::vector<std::string>& filename, bool run, bool upload, int deleteAmount);
+ 	CbrData CbrInterface::LoadCbrDataExec(std::string filename, int playerNr);
+ 	CbrData CbrInterface::LoadCbrDataNoThread(std::string filename);
+-	CbrData CbrInterface::LoadCbrDataNoThread(std::string playerName, std::string characterName);
++	CbrData CbrInterface::LoadCbrDataNoThread(std::string playerName, std::string characterName, uint64_t steamId = 0);
+ 	CbrData CbrInterface::LoadCbrDataOld(std::string filename);
+ 	void CbrInterface::MergeCbrDataThreaded(std::string filename, bool run, int playerNr);
+ 	void CbrInterface::MergeCbrDataExec(std::string filename, int playerNr);
+@@ -94,6 +95,9 @@ public:
+ 	bool autoRecordFinished = false;
+ 	bool autoUploadOwnData = true;
+ 	bool autoRecordSaveCompleted = false;
++	bool autoRecordSaveFailed = false;
++	std::string storageError;
++	uint64_t localSteamId = 0;
+ 	std::array <std::string, 2> autoRecordSaveCompletedName = { "","" };
+ 	std::array <std::string, 2> autoRecordSaveCompletedChar = { "","" };
+ 	std::array <int, 2>  autoRecordDeletionAmount = { 0,0 };
+@@ -211,8 +215,10 @@ private:
+ 	std::vector<AnnotatedReplay> reversalReplays;
+ 	
+ 	
+-	bool threadActive = false;
+-	bool processingCBRdata = false;
++	std::atomic<bool> threadActive{false};
++	std::atomic<bool> processingCBRdata{false};
++    std::atomic<int> savingReplayCount{0};
++    uint64_t savingLocalSteamId = 0;
+ 	boost::thread processingStoredRecordingsThread;
+ 
+ 	void CbrInterface::mergeCbrReplayBuffer(bool checkSkip);
+diff --git a/src/CBR/CbrUtils.h b/src/CBR/CbrUtils.h
+index 33914e4..33bc35b 100644
+--- a/src/CBR/CbrUtils.h
++++ b/src/CBR/CbrUtils.h
+@@ -6,19 +6,7 @@
+ #include <deque>
+ #include <iostream>
+ 
+-struct FileMetadata {
+-	char charName[100];
+-	char playerName[100];
+-	char opponentChar[300];
+-	int rCount;
+-
+-	friend class boost::serialization::access;
+-	template<class Archive>
+-	void serialize(Archive& a, const unsigned version) {
+-		a& charName& playerName& opponentChar& rCount;
+-	}
+-
+-};
++#include "CbrFileMetadata.h"
+ 
+ template <typename T, int MaxLen, typename Container = std::deque<T>>
+ class FixedQueue : public std::queue<T, Container> {
+diff --git a/src/CBR/CharacterStorage.cpp b/src/CBR/CharacterStorage.cpp
+index 7a63891..1a5848a 100644
+--- a/src/CBR/CharacterStorage.cpp
++++ b/src/CBR/CharacterStorage.cpp
+@@ -4,6 +4,8 @@
+ #include <iostream>
+ #include "json.hpp"
+ #include "CBR/CbrData.h"
++#include "CBR/CbrFileIO.h"
++#include "Core/logger.h"
+ #include <boost/archive/text_iarchive.hpp>
+ #include <boost/archive/text_oarchive.hpp>
+ #include <boost/serialization/vector.hpp>
+@@ -536,121 +538,56 @@ void createCbrMetadata(FileMetadata meta, std::string filename) {
+ 
+ 
+ json readCbrMetadata(std::string filename) {
+-    boost::filesystem::path dir("CBRsave\\Metadata");
+-    if (!(boost::filesystem::exists(dir))) {
+-        boost::filesystem::create_directory(dir);
+-    }
+-    auto filenameMeta = metaDataFilepathRename(filename);
+-    std::ifstream infile2(filenameMeta, std::ios_base::binary);
+-    
+-    std::string charName = "";
+-    std::string playerName = "";
+-    std::string opponentChar = "";
+-    int rCount = 0;
+-
+-    if (!infile2.fail()) {
+-        std::ifstream infile2(filenameMeta, std::ios_base::binary);
+-        boost::iostreams::filtering_stream<boost::iostreams::input> f;
+-        f.push(boost::iostreams::gzip_decompressor());
+-        f.push(infile2);
+-        boost::archive::binary_iarchive archive(f);
+-        FileMetadata insert;
+-        archive >> insert;
+-        charName = insert.charName;
+-        playerName = insert.playerName;
+-        rCount = insert.rCount;
+-        opponentChar = insert.opponentChar;
+-
+-        json j2 = {
+-          {"player_id", "local"},
+-          {"player_name", playerName},
+-          {"player_character", charName},
+-          {"opponent_character", opponentChar},
+-          {"replay_count", rCount},
+-          {"path", filename},
+-        };
+-
+-        return j2;
+-    }
+-    std::ifstream infile(filename, std::ios_base::binary);
+-    if (infile.fail()) {
+-        //File does not exist code here
+-    }
+-    else {
+-        //std::string b = "";
+-        //infile >> b;
+-        
+-        try
+-        {
+-            std::ifstream infile(filename, std::ios_base::binary);
+-            boost::iostreams::filtering_stream<boost::iostreams::input> f;
+-            f.push(boost::iostreams::gzip_decompressor());
+-            f.push(infile);
+-            boost::archive::binary_iarchive archive(f);
+-            CbrData insert;
+-            archive >> insert;
+-            charName = insert.getCharName();
+-            playerName = insert.getPlayerName();
+-            rCount = insert.getReplayCount();
+-            opponentChar = getOpponentCharNameString(insert);
+-
+-            FileMetadata meta;
+-            strcpy(meta.charName, charName.c_str());
+-            strcpy(meta.playerName, playerName.c_str());
+-            strcpy(meta.opponentChar, opponentChar.c_str());
+-            meta.rCount = rCount;
+-            createCbrMetadata(meta, filenameMeta);
++    std::lock_guard<std::mutex> lock(CbrStorageMutex());
++    const auto metadataPath = metaDataFilepathRename(filename);
++    FileMetadata meta;
++    bool cached = false;
++    try {
++        if (boost::filesystem::exists(metadataPath)) {
++            std::ifstream input(metadataPath, std::ios::binary);
++            boost::iostreams::filtering_istream compressed;
++            compressed.push(boost::iostreams::gzip_decompressor());
++            compressed.push(input);
++            boost::archive::binary_iarchive archive(compressed);
++            archive >> meta;
++            cached = true;
+         }
+-        catch (std::exception& ex) {
+-            try
+-            {
+-                std::ifstream infile2(filename, std::ios_base::binary);
+-                boost::iostreams::filtering_stream<boost::iostreams::input> f;
+-                f.push(boost::iostreams::gzip_decompressor());
+-                f.push(infile2);
+-                boost::archive::binary_iarchive archive(f);
+-                CbrData insert;
+-                archive >> charName;
+-                archive >> playerName;
+-                archive >> opponentChar;
+-                archive >> rCount;
+-
+-                FileMetadata meta;
+-                strcpy(meta.charName, charName.c_str());
+-                strcpy(meta.playerName, playerName.c_str());
+-                strcpy(meta.opponentChar, opponentChar.c_str());
+-                meta.rCount = rCount;
+-                createCbrMetadata(meta, filenameMeta);
+-                //archive >> insert;
+-            }
+-            catch (const std::exception&)
+-            {
+-
+-            }
+-            
++    } catch (const std::exception&) { /* Rebuild missing or damaged caches. */ }
++    if (!cached) {
++        try {
++            auto data = ReadCbrDataArchive(filename);
++            meta = FileMetadata{};
++            strncpy_s(meta.charName, data.getCharName().c_str(), _TRUNCATE);
++            strncpy_s(meta.playerName, data.getPlayerName().c_str(), _TRUNCATE);
++            strncpy_s(meta.opponentChar, getOpponentCharNameString(data).c_str(), _TRUNCATE);
++            meta.displayName = data.getPlayerName();
++            meta.steamId = data.getSteamId();
++            meta.rCount = data.getReplayCount();
++        } catch (const std::exception& e) {
++            ForceLog("[CBR-ID] Cannot read metadata for '%s': %s", filename.c_str(), e.what());
++            return nullptr;
+         }
+-
+-        
+-        if (charName == "") {
+-            return NULL;
++        // Metadata is a cache. Don't hide a valid recording if the cache is read-only.
++        try {
++            boost::filesystem::create_directories("CBRsave\\Metadata");
++            WriteCbrArchiveAtomic(metadataPath, meta);
++        } catch (const std::exception& e) {
++            ForceLog("[CBR-ID] Cannot cache metadata: %s", e.what());
+         }
+-        
+-
+-        json j2 = {
+-          {"player_id", "local"},
+-          {"player_name", playerName},
+-          {"player_character", charName},
+-          {"opponent_character", opponentChar},
+-          {"replay_count", rCount},
+-          {"path", filename},
+-        };
+-
+-        return j2;
+     }
+-    return NULL;
++    return {
++        {"player_id", "local"},
++        {"player_name", meta.displayName.empty() ? std::string(meta.playerName) : meta.displayName},
++        {"steam_id", meta.steamId ? std::to_string(meta.steamId) : ""},
++        {"player_character", std::string(meta.charName)},
++        {"opponent_character", std::string(meta.opponentChar)},
++        {"replay_count", meta.rCount},
++        {"path", filename},
++    };
+ }
+ 
+ /*json readCbrMetadata(std::string filename) {
++    std::lock_guard<std::mutex> lock(CbrStorageMutex());
+     std::ifstream infile(filename, std::ios_base::binary);
+     CbrData insert;
+     insert.setPlayerName("-1");
+diff --git a/src/Network/RoomManager.cpp b/src/Network/RoomManager.cpp
+index 76d82b1..86ea01d 100644
+--- a/src/Network/RoomManager.cpp
++++ b/src/Network/RoomManager.cpp
+@@ -24,6 +24,52 @@ void RoomManager::ResetCbrIdentityProbe()
+ 	m_cbrIdentityNameRequests.clear();
+ }
+ 
++CbrMatchIdentityResult RoomManager::ResolveCbrCurrentMatch(std::vector<CbrMatchMember>& members) const
++{
++    members.clear();
++    RoomType roomType = RoomType_Replay;
++    CbrMatchIdentityResult unavailable;
++    unavailable.reason = "room-or-steam-not-ready";
++    if (!IsRoomFunctional() || !TryGetRoomType(&roomType) || !m_pSteamFriends)
++        return unavailable;
++    if (roomType != RoomType_Ranked && roomType != RoomType_MatchSpectate &&
++        roomType != RoomType_Lobby && roomType != RoomType_FFA && roomType != RoomType_Training) {
++        unavailable.reason = "unsupported-room-type";
++        return unavailable;
++    }
++		for (unsigned int i = 0; i < MAX_PLAYERS_IN_ROOM; ++i)
++		{
++			const RoomMemberEntry* entry = GetRoomMemberEntryByIndex(static_cast<uint16_t>(i));
++			if (entry)
++				members.push_back({ entry->steamId, entry->matchId, i, entry->matchPlayerIndex });
++		}
++		int ffaLocalSlot = -1;
++		if (roomType == RoomType_FFA && m_pFFAThisPlayerIndex &&
++			!IsBadReadPtr(m_pFFAThisPlayerIndex, sizeof(*m_pFFAThisPlayerIndex)))
++			ffaLocalSlot = *m_pFFAThisPlayerIndex;
++
++    return ResolveCbrMatchIdentity(members, m_thisPlayerSteamID.ConvertToUint64(),
++        roomType == RoomType_Ranked, roomType == RoomType_FFA, ffaLocalSlot);
++}
++
++bool RoomManager::GetCbrMatchPlayers(std::array<uint64_t, 2>& ids,
++    std::array<std::string, 2>& names, uint64_t& localId) const
++{
++    ids = {};
++    names = {};
++    localId = m_thisPlayerSteamID.ConvertToUint64();
++    std::vector<CbrMatchMember> members;
++    const auto result = ResolveCbrCurrentMatch(members);
++    if (!result.resolved) return false;
++    for (unsigned slot = 0; slot < 2; ++slot) {
++        ids[slot] = result.players[slot].steamId;
++        const char* name = ids[slot] == localId ? m_pSteamFriends->GetPersonaName()
++            : m_pSteamFriends->GetFriendPersonaName(CSteamID(ids[slot]));
++        if (name && *name && std::string(name) != "[unknown]") names[slot] = name;
++    }
++    return true;
++}
++
+ void RoomManager::LogCbrMatchIdentities(const char* phase,
+ 	const std::string& cbrP1Name, const std::string& cbrP2Name)
+ {
+@@ -40,21 +86,9 @@ void RoomManager::LogCbrMatchIdentities(const char* phase,
+ 	}
+ 	else
+ 	{
+-		std::vector<CbrMatchMember> members;
+-		for (unsigned int i = 0; i < MAX_PLAYERS_IN_ROOM; ++i)
+-		{
+-			const RoomMemberEntry* entry = GetRoomMemberEntryByIndex(static_cast<uint16_t>(i));
+-			if (entry)
+-				members.push_back({ entry->steamId, entry->matchId, i, entry->matchPlayerIndex });
+-		}
+-		int ffaLocalSlot = -1;
+-		if (roomType == RoomType_FFA && m_pFFAThisPlayerIndex &&
+-			!IsBadReadPtr(m_pFFAThisPlayerIndex, sizeof(*m_pFFAThisPlayerIndex)))
+-			ffaLocalSlot = *m_pFFAThisPlayerIndex;
+-
+-		const uint64_t localId = m_thisPlayerSteamID.ConvertToUint64();
+-		const auto result = ResolveCbrMatchIdentity(members, localId,
+-			roomType == RoomType_Ranked, roomType == RoomType_FFA, ffaLocalSlot);
++        std::vector<CbrMatchMember> members;
++        const uint64_t localId = m_thisPlayerSteamID.ConvertToUint64();
++        const auto result = ResolveCbrCurrentMatch(members);
+ 		report << "roomType=" << static_cast<unsigned int>(roomType)
+ 			<< " local=" << localId << " status=" << result.reason;
+ 		if (result.resolved)
+diff --git a/src/Network/RoomManager.h b/src/Network/RoomManager.h
+index d127be1..f25f8a8 100644
+--- a/src/Network/RoomManager.h
++++ b/src/Network/RoomManager.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include "NetworkManager.h"
++#include "CbrMatchIdentity.h"
+ 
+ #include "Game/Room/Room.h"
+ #include "Core/utils.h"
+@@ -63,6 +64,9 @@ public:
+ 	std::vector<IMPlayer> GetIMPlayersInCurrentMatchNonSpec() const;
+ 	static RoomSettingsStatic* GetRoomSettingsStaticBaseAdress();
+ 	bool ChangeRematchAmnt(signed int new_amnt);
++	CbrMatchIdentityResult ResolveCbrCurrentMatch(std::vector<CbrMatchMember>& members) const;
++	bool GetCbrMatchPlayers(std::array<uint64_t, 2>& ids,
++		std::array<std::string, 2>& names, uint64_t& localId) const;
+ 	void ResetCbrIdentityProbe();
+ 	void LogCbrMatchIdentities(const char* phase, const std::string& cbrP1Name,
+ 		const std::string& cbrP2Name);
+diff --git a/src/Overlay/Window/CbrServerWindow.cpp b/src/Overlay/Window/CbrServerWindow.cpp
+index 240396e..64f8adf 100644
+--- a/src/Overlay/Window/CbrServerWindow.cpp
++++ b/src/Overlay/Window/CbrServerWindow.cpp
+@@ -235,17 +235,21 @@ namespace
+             ImGui::TextDisabled("Log in to network mode to upload local data.");
+         }
+ 
++        if (!cbr.threadActiveCheck() && !cbr.storageError.empty())
++            ImGui::TextWrapped("CBR: %s", cbr.storageError.c_str());
++
+         if (!g_localJsonData.is_array())
+             return false;
+ 
+         const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+             ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollX;
+-        if (!ImGui::BeginTable("CBRLocalData", 7, flags))
++        if (!ImGui::BeginTable("CBRLocalData", 8, flags))
+             return false;
+ 
+         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 36.0f);
+         ImGui::TableSetupColumn("Uploader");
+         ImGui::TableSetupColumn("Player name");
++        ImGui::TableSetupColumn("SteamID64", ImGuiTableColumnFlags_WidthFixed, 160.0f);
+         ImGui::TableSetupColumn("Player character");
+         ImGui::TableSetupColumn("Opponent character");
+         ImGui::TableSetupColumn("Replays", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+@@ -262,6 +266,8 @@ namespace
+             ImGui::TableNextColumn(); ImGui::Text("%zu", i);
+             ImGui::TableNextColumn(); ImGui::TextUnformatted(JsonString(row, "player_id").c_str());
+             ImGui::TableNextColumn(); ImGui::TextUnformatted(JsonString(row, "player_name").c_str());
++            const auto steamId = JsonString(row, "steam_id");
++            ImGui::TableNextColumn(); ImGui::TextUnformatted(steamId.empty() ? "Legacy / unknown" : steamId.c_str());
+             ImGui::TableNextColumn(); ImGui::TextUnformatted(JsonString(row, "player_character").c_str());
+             ImGui::TableNextColumn(); ImGui::TextUnformatted(JsonString(row, "opponent_character").c_str());
+             ImGui::TableNextColumn(); ImGui::Text("%d", JsonInt(row, "replay_count"));
+diff --git a/src/Overlay/Window/MainMenu/PageTraining.cpp b/src/Overlay/Window/MainMenu/PageTraining.cpp
+index 75b7395..7867411 100644
+--- a/src/Overlay/Window/MainMenu/PageTraining.cpp
++++ b/src/Overlay/Window/MainMenu/PageTraining.cpp
+@@ -136,7 +136,7 @@ namespace MainMenu
+ 				data->setCharName(player.GetData()->char_abbr);
+ 				cbr.SaveCbrDataThreaded(*data, true);
+ 			}
+-			if (ImGui::Button("Load by name", ImVec2(-1.0f, 0.0f)))
++			if (ImGui::Button("Load legacy by name", ImVec2(-1.0f, 0.0f)))
+ 			{
+ 				cbr.EndCbrActivities();
+ 				cbr.LoadCbrData(cbr.playerName, player.GetData()->char_abbr, true, playerIndex);
+diff --git a/src/Overlay/WindowManager.cpp b/src/Overlay/WindowManager.cpp
+index d92245b..64acdf1 100644
+--- a/src/Overlay/WindowManager.cpp
++++ b/src/Overlay/WindowManager.cpp
+@@ -57,8 +57,7 @@ namespace
+ {
+ 	bool HasPendingCbrAutoRecordings()
+ 	{
+-		return !g_interfaces.cbrInterface.recordBufferP1.empty() ||
+-			!g_interfaces.cbrInterface.recordBufferP2.empty();
++		return g_interfaces.cbrInterface.getAutoRecordReplayAmount() > 0;
+ 	}
+ 
+ 	void UpdateCbrAutoRecordLifecycle()
+@@ -98,11 +97,21 @@ namespace
+ 			cbr.autoRecordFinished = false;
+ 		}
+ 
++		if (cbr.threadCheckSaving())
++		{
++			if (cbr.autoRecordSaveFailed)
++                g_notificationBar->AddNotification("CBR save failed. Pending recordings were retained. Check Data Manager for details and use the save hotkey to retry.");
++            else {
++                g_notificationBar->AddNotification("CBR replay saving completed.");
++                LOG(1, "[CBR] Buffered replay save completed.\n");
++            }
++		}
++
+ 		// This is the original "Auto Saving In Lobby" predicate: keep data pending
+ 		// through Versus (14), the match (15), and the first victory state (16).
+ 		// As soon as BBCF advances beyond those states, saveReplayDataInMenu merges
+ 		// the buffered replays into each player's existing local .cbr file.
+-		if (cbr.autoRecordConfirmation &&
++		if (cbr.autoRecordConfirmation && !cbr.threadActiveCheck() && !cbr.autoRecordSaveFailed &&
+ 			gameState != GameState_VersusScreen &&
+ 			gameState != GameState_InMatch &&
+ 			gameState != GameState_VictoryScreen &&
+@@ -141,11 +150,7 @@ namespace
+ 			}
+ 		}
+ 
+-		if (cbr.threadCheckSaving())
+-		{
+-			g_notificationBar->AddNotification("CBR replay saving completed.");
+-			LOG(1, "[CBR] Buffered replay save completed.\n");
+-		}
++
+ 	}
+ }
+ 
