@@ -1,0 +1,451 @@
+diff --git a/src/CBR/CbrInterface.cpp b/src/CBR/CbrInterface.cpp
+index c1a448b..9d56168 100644
+--- a/src/CBR/CbrInterface.cpp
++++ b/src/CBR/CbrInterface.cpp
+@@ -1196,6 +1196,8 @@ void CbrInterface::saveReplayDataInMenu() {
+                         !SameCbrIdentity(id, first.getPlayerName(), replay.getSteamId(), replay.getPlayerName())) break;
+                     auto converted = CbrReplayFile(replay.getCharacterName(), replay.getCharIds());
+                     auto error = converted.makeFullCaseBase(&replay, replay.getFocusCharName());
++                    ForceLog("[CBR-CONVERT] slot=%d recording=%u errors=%d %s", slot + 1,
++                        static_cast<unsigned>(count + 1), error.errorCount, error.diagnosticSummary.c_str());
+                     if (!error.structure.empty()) saveStructureDebug(error.structure);
+                     debugErrorCounter[slot] += error.errorCount;
+                     if (error.errorCount != 0) {
+diff --git a/src/CBR/CbrReplayFile.cpp b/src/CBR/CbrReplayFile.cpp
+index dbe7979..13a06f7 100644
+--- a/src/CBR/CbrReplayFile.cpp
++++ b/src/CBR/CbrReplayFile.cpp
+@@ -4,8 +4,56 @@
+ #include "CbrReplayFile.h"
+ #include "Metadata.h"
+ #include "AnnotatedReplay.h"
++#include <sstream>
++#include <numeric>
++
++
++namespace {
++std::string ReportInputs(const std::vector<int>& values) {
++    std::ostringstream out;
++    for (int value : values) {
++        if (out.tellp() > 0) out << ' ';
++        if (value < 0) { out << "release:"; value = -value; }
++        switch (value) {
++        case 0: out << '_'; break;
++        case 16: out << 'A'; break;
++        case 32: out << 'B'; break;
++        case 64: out << 'C'; break;
++        case 128: out << 'D'; break;
++        case 1100: out << "forward"; break;
++        case 1101: out << "back"; break;
++        case 1102: out << "up"; break;
++        case 1103: out << "down"; break;
++        default: out << value; break;
++        }
++    }
++    return out.str();
++}
+ 
++std::string ReportCommands(const std::vector<inputMemory>& commands) {
++    std::string out;
++    for (const auto& command : commands) {
++        if (!out.empty()) out += " OR ";
++        out += command.name + "[" + ReportInputs(command.inputs) + "]";
++    }
++    return out;
++}
+ 
++std::string ReportFrame(CbrReplayFile& converter, const char* stage, int sample,
++    int sourceSample, const Metadata& metadata, int encoded, bool retained) {
++    std::ostringstream out;
++    out << stage << " sample=" << sample << " source_sample=" << sourceSample
++        << " game_frame=" << metadata.frame_count_minus_1
++        << " retained=" << retained << " input=" << encoded
++        << " facing=" << (metadata.facing ? "left" : "right")
++        << " relative=[" << ReportInputs(converter.DeconstructInput(encoded, metadata.facing)) << ']'
++        << " action=" << metadata.currentAction[0] << " opponent_action=" << metadata.currentAction[1]
++        << " self_hit=" << metadata.hitThisFrame[0] << " opponent_hit=" << metadata.hitThisFrame[1]
++        << " self_block=" << metadata.BlockThisFrame[0] << " opponent_block=" << metadata.BlockThisFrame[1]
++        << '\n';
++    return out.str();
++}
++}
+ 
+ #define caseNeutralTime 12
+ #define caseMinTime 4
+@@ -60,7 +108,7 @@ int CbrReplayFile::getInput(int i) {
+ 
+ 
+ 
+-CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string charName, int startIndex, int endIndex, int insertPoint) {
++CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string charName, int startIndex, int endIndex, int insertPoint, AnnotatedReplay* diagnosticSource) {
+ 
+     //Input command related initalization
+     bool facingCommandStart = 0;
+@@ -84,6 +132,21 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+     int meterRequirement = 0;
+     int odRequirement = 0;
+     
++    CbrGenerationError retError{};
++    const int samplesBefore = static_cast<int>(input.size());
++    std::vector<int> sourceSamples;
++    if (diagnosticSource) {
++        sourceSamples.resize(input.size());
++        std::iota(sourceSamples.begin(), sourceSamples.end(), 0);
++    }
++    int rawRepeats = 0, rawRewinds = 0;
++    for (int i = startIndex + 1; i <= endIndex; ++i) {
++        const auto prior = ar->ViewMetadata(i - 1).getFrameCount();
++        const auto current = ar->ViewMetadata(i).getFrameCount();
++        rawRepeats += current == prior;
++        rawRewinds += current < prior;
++    }
++
+     //Making sure rollbacks dont cause issues by deleting rolled back frames
+     int reduceAmount = 0;
+     for (std::vector<int>::size_type i = endIndex;
+@@ -92,6 +155,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+         auto metaData = ar->getAllMetadata();
+         if (endIndex != i && frameCount <= ar->ViewMetadata(i).getFrameCount()) {
+             input.erase(input.begin() + i);
++            if (diagnosticSource) sourceSamples.erase(sourceSamples.begin() + i);
+             metaData->erase(metaData->begin() + i);
+             reduceAmount++;
+         }
+@@ -102,10 +166,67 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+ 
+     
+     //Data structures for debugging
+-    CbrGenerationError retError;
+-    retError.errorCount = 0;
+-    retError.errorDetail = "";
+-    //int errorCounter = 0;
++    int timelineErrors = 0, timelineGaps = 0;
++    for (int i = startIndex + 1; i <= adjustedEndIndex; ++i) {
++        const auto prior = ar->ViewMetadata(i - 1).getFrameCount();
++        const auto current = ar->ViewMetadata(i).getFrameCount();
++        timelineErrors += current <= prior;
++        timelineGaps += static_cast<long long>(current) - prior > 1;
++    }
++    retError.diagnosticSummary = "character=" + charName +
++        " samples_before=" + std::to_string(samplesBefore) +
++        " samples_after=" + std::to_string(input.size()) +
++        " removed=" + std::to_string(reduceAmount) +
++        " raw_repeats=" + std::to_string(rawRepeats) +
++        " raw_rewinds=" + std::to_string(rawRewinds) +
++        " cleaned_non_increasing=" + std::to_string(timelineErrors) +
++        " cleaned_gaps=" + std::to_string(timelineGaps);
++    const auto appendTraces = [&]() {
++        retError.errorDetail += "\n[CLEANED_TRACE] relative inputs use each frame's facing\n";
++        for (int i = startIndex; i <= adjustedEndIndex && i < static_cast<int>(input.size()) && i < ar->MetadataSize(); ++i) {
++            const int source = diagnosticSource ? sourceSamples[i] : -1;
++            retError.errorDetail += ReportFrame(*this, "cleaned", i, source,
++                ar->ViewMetadata(i), input[i], true);
++        }
++        if (diagnosticSource) {
++            retError.errorDetail += "[RAW_TRACE] before rollback cleanup; removed samples have retained=0\n";
++            std::vector<bool> retained(samplesBefore, false);
++            for (int sample : sourceSamples) retained[sample] = true;
++            const auto& rawInputs = *diagnosticSource->getInputPtr();
++            for (int i = 0; i < samplesBefore; ++i)
++                retError.errorDetail += ReportFrame(*this, "raw", i, i,
++                    diagnosticSource->ViewMetadata(i), rawInputs[i], retained[i]);
++        }
++    };
++    if (timelineErrors || adjustedEndIndex <= startIndex || input.size() != ar->MetadataSize()) {
++        retError.errorCount = 1;
++        retError.diagnosticSummary += " timeline_valid=0";
++        retError.errorDetail = "[TIMELINE_INVALID] " + retError.diagnosticSummary +
++            " reason=non_increasing_frames_or_insufficient_samples_or_alignment\n";
++        appendTraces();
++        return retError;
++    }
++    std::vector<inputMemory> expectedPlayer, expectedDoll;
++    int playerCommandStart = -1, dollCommandStart = -1;
++    const auto commandFailure = [&](const char* actor, int start, int lastChecked,
++        const std::vector<inputMemory>& expected, const std::vector<inputMemory>& remaining, int counter) {
++        std::ostringstream out;
++        out << "[COMMAND_UNRESOLVED] actor=" << actor << " character=" << charName
++            << " resolver_facing=" << (facingCommandStart ? "left" : "right")
++            << " start_sample=" << start << " last_checked_sample=" << lastChecked
++            << " counter=" << counter << " expected=" << ReportCommands(expected)
++            << " remaining=" << ReportCommands(remaining);
++        if (start >= 0 && start <= adjustedEndIndex) {
++            out << " start_game_frame=" << ar->ViewMetadata(start).getFrameCount()
++                << " start_facing=" << (ar->ViewMetadata(start).getFacing() ? "left" : "right");
++            if (diagnosticSource) out << " source_sample=" << sourceSamples[start];
++            if (start > 0) out << " previous_action=" << ar->ViewMetadata(start - 1).getCurrentAction()[0];
++            out << " action=" << ar->ViewMetadata(start).getCurrentAction()[0];
++        }
++        out << "\nCause unclassified: check command table, buffering, facing, capture, and timeline.\n";
++        return out.str();
++    };
++    int commandErrors = 0;
+     int debugInt = 0;
+     bool inputBuffering = false;
+     std::string debugStructureStr = "";
+@@ -151,7 +272,8 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+             debugInt++;
+             if (debugInt == 200) {
+                 retError.errorCount++;
+-                retError.errorDetail += "\nerror on move: " + inputResolveName + "\n" + "Frame: " + std::to_string(i) + "\n Not resolved in 200 steps\n" ;
++                ++commandErrors;
++                retError.errorDetail += commandFailure("player", playerCommandStart, static_cast<int>(i), expectedPlayer, inputResolve, debugInt);
+             }
+             auto deconInputs = DeconstructInput(input[i], facingCommandStart);
+             for (std::vector<int>::size_type j = 0; j < deconInputs.size(); ++j) {
+@@ -165,7 +287,8 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+             debugInt++;
+             if (debugInt == 100) {
+                 retError.errorCount++;
+-                retError.errorDetail += "error on doll move: " + inputResolveName + "\n" + "Not resolved in 100 steps\n";
++                ++commandErrors;
++                retError.errorDetail += commandFailure("doll", dollCommandStart, static_cast<int>(i), expectedDoll, dollResolve, debugInt);
+             }
+             auto deconInputs = DeconstructInput(input[i], facingCommandStart);
+             for (std::vector<int>::size_type j = 0; j < deconInputs.size(); ++j) {
+@@ -191,6 +314,10 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+                     inputResolve = MakeInputArray(curState, commands, ar->ViewMetadata(i).getCurrentAction()[0]);
+                     inputResolve = MakeInputArraySuperJump(curState, input, i, inputResolve);
+                     if (inputResolve.size() > 0) {
++                        if (diagnosticSource) {
++                            expectedPlayer = inputResolve;
++                            playerCommandStart = static_cast<int>(i + 1);
++                        }
+                         debugInt = 0;
+                         inputResolveName = curState;
+                         inputBuffering = true;
+@@ -217,6 +344,10 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+                     }
+                     dollResolve = MakeInputArray(curStateDoll, FetchNirvanaCommandActions(), "none");
+                     if (dollResolve.size() > 0) {
++                        if (diagnosticSource) {
++                            expectedDoll = dollResolve;
++                            dollCommandStart = static_cast<int>(i + 1);
++                        }
+                         debugInt = 0;
+                         inputResolveName = curState;
+                         inputBuffering = true;
+@@ -252,7 +383,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+                     if ((cbrCase[insertPoint].getMetadata()->hitMinX > 0 || cbrCase[insertPoint].getMetadata()->hitMinX > 0)) {
+                         if (!cbrCase[insertPoint + 1].getMetadata()->getHitThisFrame()[1] && !cbrCase[insertPoint + 1].getMetadata()->getBlockThisFrame()[1]) {
+                             retError.errorCount++;
+-                             retError.errorDetail += "minDist: \n";
++                             retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+                         }
+                     }
+ 
+@@ -277,7 +408,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+             //if i is somehow bigger than the array its iterating create an error
+             if ((int)i > iteratorIndex) {
+                 retError.errorCount++;
+-                retError.errorDetail += "Iterator error: " + inputResolveName + "\n";
++                retError.errorDetail += "[CASE_LAYOUT] iterator: " + inputResolveName + "\n";
+             }
+             iteratorIndex = i - 1;
+             framesIdle = -1;
+@@ -312,11 +443,11 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+                     if ((cbrCase[updatedInsertPoint].getMetadata()->hitMinX > 0 || cbrCase[updatedInsertPoint].getMetadata()->hitMinX > 0)) {
+                         if (!cbrCase[updatedInsertPoint + 1].getMetadata()->getHitThisFrame()[1] && !cbrCase[updatedInsertPoint + 1].getMetadata()->getBlockThisFrame()[1]) {
+                             retError.errorCount++;
+-                            retError.errorDetail += "minDist: \n";
++                            retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+                         }
+                         //if (!cbrCase[updatedInsertPoint].getMetadata()->getNeutral()[0]) {
+                         //    retError.errorCount++;
+-                            retError.errorDetail += "minDist: \n";
++                            retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+                         //}
+                     }
+                 //}
+@@ -340,7 +471,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+             //cbrCase.insert(cbrCase.begin() + updatedInsertPoint, CbrCase(std::move(ar->CopyMetadataPtr(startIndex)), (int)startIndex, end));
+             if (cbrCase[updatedInsertPoint].getStartingIndex() > cbrCase[updatedInsertPoint].getEndIndex()) {
+                 retError.errorCount++;
+-                retError.errorDetail += "StartingIndex Error: \n";
++                retError.errorDetail += "[CASE_LAYOUT] inverted_range: \n";
+             }
+             auto caseBaseSize = cbrCase.size();
+             auto testEnd = 0;
+@@ -351,7 +482,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+                 else {
+                     if (testEnd + 1 != cbrCase[j].getStartingIndex()) {
+                         retError.errorCount++;
+-                        retError.errorDetail += "testEnd error: \n";
++                        retError.errorDetail += "[CASE_LAYOUT] continuity_finish: \n";
+                     }
+                     testEnd = cbrCase[j].getEndIndex();
+                 }
+@@ -373,11 +504,11 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+                     if ((cbrCase[insertPoint].getMetadata()->hitMinX > 0 || cbrCase[insertPoint].getMetadata()->hitMinX > 0)) {
+                         if (!cbrCase[insertPoint + 1].getMetadata()->getHitThisFrame()[1] && !cbrCase[insertPoint + 1].getMetadata()->getBlockThisFrame()[1]) {
+                             retError.errorCount++;
+-                            retError.errorDetail += "minDist: \n";
++                            retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+                         }
+                         //if (!cbrCase[insertPoint].getMetadata()->getNeutral()[0]) {
+                         //    retError.errorCount++;
+-                        //    retError.errorDetail += "minDist: \n";
++                        //    retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+                         //}
+                     }
+                 //}
+@@ -398,7 +529,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+             cbrCase[insertPoint].setInputBufferSequence(inputBuffering);
+             if ((int)startIndex > iteratorIndex) {
+                 retError.errorCount++;
+-                retError.errorDetail += "startIndex error\n";
++                retError.errorDetail += "[CASE_LAYOUT] invalid_start\n";
+             }
+             auto caseBaseSize = cbrCase.size();
+             auto testEnd = 0;
+@@ -409,7 +540,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+                 else {
+                     if (testEnd + 1 != cbrCase[j].getStartingIndex()) {
+                         retError.errorCount++;
+-                        retError.errorDetail += "testend2nd error: \n";
++                        retError.errorDetail += "[CASE_LAYOUT] continuity_initial: \n";
+                     }
+                     testEnd = cbrCase[j].getEndIndex();
+                 }
+@@ -437,11 +568,11 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+                     if ((cbrCase[i].getMetadata()->hitMinX > 0 || cbrCase[i].getMetadata()->hitMinX > 0)) {
+                         if (!cbrCase[i + 1].getMetadata()->getHitThisFrame()[1] && !cbrCase[i + 1].getMetadata()->getBlockThisFrame()[1]) {
+                             retError.errorCount++;
+-                            retError.errorDetail += "minDist: \n";
++                            retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+                         }
+                         //if (!cbrCase[i].getMetadata()->getNeutral()[0]) {
+                         //    retError.errorCount++;
+-                        //    retError.errorDetail += "minDist: \n";
++                        //    retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+                         //}
+                     }
+                // }
+@@ -503,7 +634,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+         else {
+             if (testEnd + 1 != cbrCase[j].getStartingIndex()) {
+                 retError.errorCount++;
+-                retError.errorDetail += "testend3nd error: \n";
++                retError.errorDetail += "[CASE_LAYOUT] continuity_final: \n";
+             }
+             testEnd = cbrCase[j].getEndIndex();
+         }
+@@ -511,34 +642,32 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+         if ((cbrCase[j].getMetadata()->hitMinX > 0 || cbrCase[j].getMetadata()->hitMinX > 0)) {
+             if (j + 1 >= caseBaseSize || (!cbrCase[j + 1].getMetadata()->getHitThisFrame()[1] && !cbrCase[j + 1].getMetadata()->getBlockThisFrame()[1])) {
+                 retError.errorCount++;
+-                retError.errorDetail += "minDist: \n";
++                retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+             }
+             //if (!cbrCase[j].getMetadata()->getNeutral()[0]) {
+             //    retError.errorCount++;
+-            //    retError.errorDetail += "minDist: \n";
++            //    retError.errorDetail += "[CASE_VALIDATION] min_distance: \n";
+             //}
+         }
+   
+     }
+ 
++    retError.diagnosticSummary += " timeline_valid=1 command_errors=" + std::to_string(commandErrors) +
++        " case_errors=" + std::to_string(retError.errorCount - commandErrors);
+     if (retError.errorCount > 0) {
+-        for (std::vector<int>::size_type i = startIndex;
+-            i <= adjustedEndIndex; i++) {
+-            if (ar->CopyMetadataPtr(i) != nullptr) {
+-                retError.errorDetail += " Frame: " + std::to_string(i) + " " + ar->CopyMetadataPtr(i)->getCurrentAction()[0];
+-            }
+-            else {
+-                retError.errorDetail += " Frame: " + std::to_string(i) + " " + "ERROR PTR WAS NULL";
+-            }
+-        }
+-        retError.errorDetail += "\n";
+-        for (std::vector<int>::size_type i = startIndex;
+-            i <= adjustedEndIndex; i++) {
+-            retError.errorDetail += " Frame: " + std::to_string(i) + " " + std::to_string(input[i]);
++        retError.errorDetail = "[TIMELINE_SUMMARY] " + retError.diagnosticSummary +
++            "\nRollback removal and frame gaps are observations, not a diagnosis.\n" + retError.errorDetail;
++        retError.errorDetail += "[CASE_TRACE]\n";
++        for (size_t i = 0; i < cbrCase.size(); ++i) {
++            retError.errorDetail += "case=" + std::to_string(i) +
++                " start=" + std::to_string(cbrCase[i].getStartingIndex()) +
++                " end=" + std::to_string(cbrCase[i].getEndIndex()) +
++                " input_buffer=" + std::to_string(cbrCase[i].getInputBufferSequence()) + "\n";
+         }
++        appendTraces();
+     }
+ 
+-    retError.structure = charName + "\n" + debugStructureStr;
++    retError.structure = charName + "\n[TIMELINE_SUMMARY] " + retError.diagnosticSummary + "\n" + debugStructureStr;
+     return retError;
+ }
+ 
+@@ -630,7 +759,11 @@ CbrGenerationError CbrReplayFile::makeFullCaseBase(AnnotatedReplay* ar, std::str
+     CbrGenerationError ret{};
+     if (!ar || ar->getInputSize() != ar->MetadataSize()) {
+         ret.errorCount = 1;
+-        ret.errorDetail = "Input/metadata size mismatch";
++        ret.errorDetail = "[CAPTURE_INVALID] character=" + charName + " input_samples=" +
++            std::to_string(ar ? ar->getInputSize() : -1) + " metadata_samples=" +
++            std::to_string(ar ? ar->MetadataSize() : -1) + " reason=missing_replay_or_size_mismatch\n";
++        ret.diagnosticSummary = ret.errorDetail;
++        if (!ret.diagnosticSummary.empty() && ret.diagnosticSummary.back() == '\n') ret.diagnosticSummary.pop_back();
+         return ret;
+     }
+ 
+@@ -640,7 +773,9 @@ CbrGenerationError CbrReplayFile::makeFullCaseBase(AnnotatedReplay* ar, std::str
+     for (auto& metadata : *working.getAllMetadata()) {
+         if (!metadata) {
+             ret.errorCount = 1;
+-            ret.errorDetail = "Missing replay metadata";
++            ret.errorDetail = "[CAPTURE_INVALID] character=" + charName + " reason=missing_metadata\n";
++            ret.diagnosticSummary = ret.errorDetail;
++            if (!ret.diagnosticSummary.empty() && ret.diagnosticSummary.back() == '\n') ret.diagnosticSummary.pop_back();
+             return ret;
+         }
+         metadata = std::make_shared<Metadata>(*metadata);
+@@ -649,10 +784,22 @@ CbrGenerationError CbrReplayFile::makeFullCaseBase(AnnotatedReplay* ar, std::str
+     const int end = working.getInputSize() - 1;
+     if (end <= 0) {
+         ret.errorCount = 1;
+-        ret.errorDetail = "0 size replay";
++        ret.errorDetail = "[CAPTURE_INVALID] character=" + charName + " reason=insufficient_samples\n";
++        ret.diagnosticSummary = ret.errorDetail;
++        if (!ret.diagnosticSummary.empty() && ret.diagnosticSummary.back() == '\n') ret.diagnosticSummary.pop_back();
+         return ret;
+     }
+-    return MakeCaseBase(&working, charName, 0, end, 0);
++    // Keep the pre-cleanup vectors for error-only traces. Metadata fields used
++    // by the trace (action, facing, frame, hit/block) are not changed by conversion.
++    auto diagnosticSource = working;
++    ret = MakeCaseBase(&working, charName, 0, end, 0, &diagnosticSource);
++    if (ret.errorCount) {
++        ret.errorDetail = "\n[CBR_CONVERSION] format=2 character=" + charName +
++            " steam_id=" + std::to_string(ar->getSteamId()) +
++            " captured_samples=" + std::to_string(ar->getInputSize()) +
++            " trimmed_samples=" + std::to_string(working.getInputSize()) + "\n" + ret.errorDetail;
++    }
++    return ret;
+ }
+ 
+ 
+diff --git a/src/CBR/CbrReplayFile.h b/src/CBR/CbrReplayFile.h
+index b0553f7..244b6f1 100644
+--- a/src/CBR/CbrReplayFile.h
++++ b/src/CBR/CbrReplayFile.h
+@@ -11,6 +11,7 @@ struct CbrGenerationError
+     std::string structure;
+     std::string errorDetail;
+     int errorCount;
++    std::string diagnosticSummary;
+ };
+ 
+ struct CommandActions
+@@ -56,7 +57,7 @@ public:
+     int getCaseBaseLength();
+     int getInput(int);
+ 
+-    CbrGenerationError MakeCaseBase(AnnotatedReplay*, std::string, int, int, int);
++    CbrGenerationError MakeCaseBase(AnnotatedReplay*, std::string, int, int, int, AnnotatedReplay* diagnosticSource = nullptr);
+     bool CbrReplayFile::CheckCaseEnd(int framesIdle, Metadata ar, std::string prevState, bool neutral, std::vector<CommandActions>& commands);
+     bool CheckNeutralState(std::string);
+     std::vector<int> DeconstructInput(int, bool);

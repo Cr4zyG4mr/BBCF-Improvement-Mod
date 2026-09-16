@@ -35,7 +35,8 @@ jobs:
             "cbr-netplay-stack-frame-fix.patch",
             "cbr-steamid-match-map-probe.patch",
             "cbr-steamid-persistence.patch",
-            "cbr-conversion-safety.patch"
+            "cbr-conversion-safety.patch",
+            "cbr-conversion-diagnostics.patch"
           )
 
           foreach ($patch in $patches) {
