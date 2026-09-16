@@ -1,0 +1,57 @@
+diff --git a/src/Hooks/hooks_cbr_runtime.cpp b/src/Hooks/hooks_cbr_runtime.cpp
+--- a/src/Hooks/hooks_cbr_runtime.cpp
++++ b/src/Hooks/hooks_cbr_runtime.cpp
+@@ -96,10 +96,29 @@ namespace
+         static int playerNr = -1;
+         static bool cbrReady = false;
+ 
++        // This hook replaces an unconditional BBCF branch. Until CBR is actually
++        // ready, it must behave exactly like that original branch: no input write,
++        // no register changes, and no EFLAGS changes.
+         __asm
+         {
+-            // This intentionally mirrors the legacy CBR hook. The hook replaces
+-            // a branch site and writes the packed P2 input before continuing.
++            pushfd
++            pushad
++        }
++
++        cbrReady = IsCbrRuntimeStateReady();
++
++        __asm
++        {
++            popad
++            cmp cbrReady, 0
++            jne cbrP2InputActive
++            popfd
++            jmp [g_p2InputOriginalTarget]
++
++        cbrP2InputActive:
++            popfd
++
++            // Legacy CBR behavior while an actual supported match is active.
+             mov [esi], ax
+             mov [addr], esi
+             mov playerNr, ebx
+@@ -107,20 +126,12 @@ namespace
+             pushad
+         }
+ 
+-        cbrReady = IsCbrRuntimeStateReady();
+-        if (cbrReady)
+-            CBRLogic(addr, 4, true, true, playerNr);
++        CBRLogic(addr, 4, true, true, playerNr);
+ 
+         __asm
+         {
+             popad
+             popfd
+-
+-            cmp cbrReady, 0
+-            jne cbrP2InputActive
+-            jmp [g_p2InputOriginalTarget]
+-
+-        cbrP2InputActive:
+             jmp [g_p2InputJmpBack]
+         }
+     }
