@@ -1,0 +1,109 @@
+diff --git a/src/CBR/CbrReplayFile.cpp b/src/CBR/CbrReplayFile.cpp
+index a1d3b8d..dbe7979 100644
+--- a/src/CBR/CbrReplayFile.cpp
++++ b/src/CBR/CbrReplayFile.cpp
+@@ -151,7 +151,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+             debugInt++;
+             if (debugInt == 200) {
+                 retError.errorCount++;
+-                retError.errorDetail += "\nerror on move: " + inputResolveName + "\n" + "Frame: " + std::to_string(i) + "\n Not resolved in 100 steps\n" ;
++                retError.errorDetail += "\nerror on move: " + inputResolveName + "\n" + "Frame: " + std::to_string(i) + "\n Not resolved in 200 steps\n" ;
+             }
+             auto deconInputs = DeconstructInput(input[i], facingCommandStart);
+             for (std::vector<int>::size_type j = 0; j < deconInputs.size(); ++j) {
+@@ -509,7 +509,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+         }
+         //Checking if min distance is truely only set in the proper conditions
+         if ((cbrCase[j].getMetadata()->hitMinX > 0 || cbrCase[j].getMetadata()->hitMinX > 0)) {
+-            if (!cbrCase[j + 1].getMetadata()->getHitThisFrame()[1] && !cbrCase[j + 1].getMetadata()->getBlockThisFrame()[1]) {
++            if (j + 1 >= caseBaseSize || (!cbrCase[j + 1].getMetadata()->getHitThisFrame()[1] && !cbrCase[j + 1].getMetadata()->getBlockThisFrame()[1])) {
+                 retError.errorCount++;
+                 retError.errorDetail += "minDist: \n";
+             }
+@@ -523,7 +523,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+ 
+     if (retError.errorCount > 0) {
+         for (std::vector<int>::size_type i = startIndex;
+-            i < endIndex; i++) {
++            i <= adjustedEndIndex; i++) {
+             if (ar->CopyMetadataPtr(i) != nullptr) {
+                 retError.errorDetail += " Frame: " + std::to_string(i) + " " + ar->CopyMetadataPtr(i)->getCurrentAction()[0];
+             }
+@@ -533,7 +533,7 @@ CbrGenerationError CbrReplayFile::MakeCaseBase(AnnotatedReplay* ar, std::string
+         }
+         retError.errorDetail += "\n";
+         for (std::vector<int>::size_type i = startIndex;
+-            i < endIndex; i++) {
++            i <= adjustedEndIndex; i++) {
+             retError.errorDetail += " Frame: " + std::to_string(i) + " " + std::to_string(input[i]);
+         }
+     }
+@@ -619,32 +619,40 @@ void trimIdleInReplay(AnnotatedReplay* ar) {
+ }
+ 
+ CbrGenerationError CbrReplayFile::makeFullCaseBase(AnnotatedReplay* ar, std::string charName, bool trim) {
+-
+-    if (trim) {
+-        trimIdleInReplay(ar);
++    // A full conversion replaces any previous result. Retrying on the same
++    // partially built case vector duplicated cases and obscured the first error.
++    cbrCase.clear();
++    input.clear();
++    stateChangeTrigger = false;
++    commandInputNeedsResolving = false;
++    inputResolveName.clear();
++
++    CbrGenerationError ret{};
++    if (!ar || ar->getInputSize() != ar->MetadataSize()) {
++        ret.errorCount = 1;
++        ret.errorDetail = "Input/metadata size mismatch";
++        return ret;
+     }
+-    
+-
+-    CbrGenerationError ret;
+-    ret.errorCount = 0;
+-    ret.errorDetail = "";
+-    int start = 0;
+-    int end = ar->getInput().size() - 1;
+ 
++    // Rollback cleanup erases frames, and case construction modifies metadata.
++    // Keep the pending recording untouched so a failed save can be retried.
++    auto working = *ar;
++    for (auto& metadata : *working.getAllMetadata()) {
++        if (!metadata) {
++            ret.errorCount = 1;
++            ret.errorDetail = "Missing replay metadata";
++            return ret;
++        }
++        metadata = std::make_shared<Metadata>(*metadata);
++    }
++    if (trim) trimIdleInReplay(&working);
++    const int end = working.getInputSize() - 1;
+     if (end <= 0) {
+         ret.errorCount = 1;
+         ret.errorDetail = "0 size replay";
+         return ret;
+     }
+-
+-
+-
+-    auto testCopy = *ar;
+-    ret = MakeCaseBase(ar, charName, start, end, 0);
+-    if (ret.errorCount > 0) {
+-        ret = MakeCaseBase(&testCopy, charName, start, end, 0);
+-    }
+-    return ret;
++    return MakeCaseBase(&working, charName, 0, end, 0);
+ }
+ 
+ 
+@@ -1303,7 +1311,7 @@ std::vector<CommandActions> nuCommands =
+     { "SpecialDashAirF", {-6,6,-forward,6}},
+     { "SpecialDashAirB", {-4,4,-back,4}},
+     { "GedanShot", {2,3,6,D}},
+-    { "TimelagShot", {2,3,6,D}},
++    { "TimelagShot", {2,1,4,D}},
+     { "ChudanShot", {2,1,4,D}},
+     { "ChudanShot", {2,1,7,D}},
+     { "SlowFieldA", {2,1,4,A}},

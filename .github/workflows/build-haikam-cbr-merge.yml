@@ -34,7 +34,8 @@ jobs:
             "cbr-online-dormant-branch-fix.patch",
             "cbr-netplay-stack-frame-fix.patch",
             "cbr-steamid-match-map-probe.patch",
-            "cbr-steamid-persistence.patch"
+            "cbr-steamid-persistence.patch",
+            "cbr-conversion-safety.patch"
           )
 
           foreach ($patch in $patches) {
@@ -110,6 +111,14 @@ jobs:
           cl /nologo /EHsc /std:c++17 tools/cbr_identity_test.cpp /Fe:cbr_identity_test.exe
           if errorlevel 1 exit /b %errorlevel%
           cbr_identity_test.exe
+          if errorlevel 1 exit /b %errorlevel%
+
+      - name: Test CBR conversion and rollback safety (Win32)
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars32.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          python tools/test_cbr_conversion.py --boost-root "%VCPKG_INSTALLATION_ROOT%\installed\x86-windows-static"
           if errorlevel 1 exit /b %errorlevel%
 
       - name: Build Release Win32
