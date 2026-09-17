@@ -1,0 +1,126 @@
+diff --git a/src/Core/dllmain.cpp b/src/Core/dllmain.cpp
+--- a/src/Core/dllmain.cpp
++++ b/src/Core/dllmain.cpp
+@@ -1,5 +1,6 @@
+ #include "Audio/BgmReplacementManager.h"
+ #include "crashdump.h"
++#include "ExitDiagnostics.h"
+ #include "info.h"
+ #include "BuildInfo.autogen.h"
+ #include "interfaces.h"
+@@ -90,6 +91,7 @@
+ 
+ void BBCF_IM_Shutdown()
+ {
++        TraceExitDiagnostic("BBCF_IM_Shutdown", g_cleanShutdown);
+         g_cleanShutdown = true;
+         LOG(1, "BBCF_IM_Shutdown\n");
+ 		RankedProbeDumpSummary("BBCF_IM_Shutdown");
+@@ -374,6 +376,7 @@
+ }
+ 
+                 case DLL_PROCESS_DETACH:
++                        TraceExitDiagnostic("DLL_PROCESS_DETACH", reinterpret_cast<ULONG_PTR>(lpReserved), g_cleanShutdown);
+                         if (lpReserved == nullptr && !g_cleanShutdown)
+                         {
+                                 WriteCrashBundle("DLL unloaded unexpectedly (lpReserved == nullptr)", nullptr, false);
+diff --git a/src/Core/logger.cpp b/src/Core/logger.cpp
+--- a/src/Core/logger.cpp
++++ b/src/Core/logger.cpp
+@@ -345,6 +345,18 @@
+         fflush(g_reFile);
+ }
+ 
++HANDLE DuplicateDebugLogHandle()
++{
++    const std::lock_guard<std::mutex> lock(g_logMutex);
++    if (!g_oFile) return INVALID_HANDLE_VALUE;
++    fflush(g_oFile);
++    HANDLE duplicate = INVALID_HANDLE_VALUE;
++    const HANDLE source = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(g_oFile)));
++    if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &duplicate,
++        0, FALSE, DUPLICATE_SAME_ACCESS)) return INVALID_HANDLE_VALUE;
++    return duplicate;
++}
++
+ void ForceLogRaw(const char* line)
+ {
+ 	if (!line || !*line)
+diff --git a/src/Core/logger.h b/src/Core/logger.h
+--- a/src/Core/logger.h
++++ b/src/Core/logger.h
+@@ -45,6 +45,8 @@
+ // handler never got another instruction. This one allocates nothing, takes no lock it is
+ // willing to wait for, and never touches the ring.
+ void ForceLogRaw(const char* line);
++// Duplicate the underlying handle during normal startup, for lock-free exit writes.
++HANDLE DuplicateDebugLogHandle();
+ void openLogger();
+ void closeLogger();
+ void SetLoggingEnabled(bool enabled);
+diff --git a/src/Hooks/hooks_detours.cpp b/src/Hooks/hooks_detours.cpp
+--- a/src/Hooks/hooks_detours.cpp
++++ b/src/Hooks/hooks_detours.cpp
+@@ -5,6 +5,9 @@
+ #include "Core/interfaces.h"
+ #include "Core/crashdump.h"
+ #include "Core/logger.h"
++#include "Core/ExitDiagnostics.h"
++#include "Core/BuildInfo.autogen.h"
++#include "Core/utils.h"
+ #include "D3D9EXWrapper/ID3D9Wrapper_Sprite.h"
+ #include "D3D9EXWrapper/ID3DXWrapper_Effect.h"
+ #include "D3D9EXWrapper/ID3D9EXWrapper.h"
+@@ -1783,6 +1786,15 @@
+ {
+ 	LOG(1, "placeHooks_detours\n");
+ 
++	if (IsLoggingEnabled())
++	{
++		const DWORD exitHooks = InitializeExitDiagnostics(
++			GamePathW(L"BBCF_IM\\ExitDiagnostics.log").c_str(), DuplicateDebugLogHandle());
++		ForceLog("[EXITDIAG] build=%s built=%s installedMask=0x%02X expected=0x1F; details in BBCF_IM/ExitDiagnostics.log",
++			BUILD_GIT_HASH, BUILD_TIMESTAMP, exitHooks);
++		TraceExitDiagnostic("build=" BUILD_GIT_HASH " built=" BUILD_TIMESTAMP);
++	}
++
+ 	LogOsVersion();
+ 	LogDisplayAdapters();
+ 	LogGameFolderContents();
+diff --git a/src/Hooks/hooks_bbcf.cpp b/src/Hooks/hooks_bbcf.cpp
+--- a/src/Hooks/hooks_bbcf.cpp
++++ b/src/Hooks/hooks_bbcf.cpp
+@@ -1,3 +1,4 @@
++#include "Core/ExitDiagnostics.h"
+ #include "hooks_bbcf.h"
+ 
+ #include "Core/crashdump.h"
+@@ -8528,6 +8529,7 @@
+ 
+ LRESULT ImGuiWndProcCounted(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+ {
++	TraceExitWindowMessage(hwnd, msg, wParam, lParam);
+ 	switch (msg)
+ 	{
+ 	case WM_MOUSEMOVE: case WM_NCMOUSEMOVE:
+diff --git a/BBCF_IM.vcxproj b/BBCF_IM.vcxproj
+--- a/BBCF_IM.vcxproj
++++ b/BBCF_IM.vcxproj
+@@ -157,6 +157,9 @@
+     <ClCompile Include="src\D3D9EXWrapper\ID3DXWrapper_Effect.cpp" />
+     <ClCompile Include="src\Hooks\HookManager.cpp" />
+     <ClCompile Include="src\Core\logger.cpp" />
++    <ClCompile Include="src\Core\ExitDiagnostics.cpp">
++      <OmitFramePointers>false</OmitFramePointers>
++    </ClCompile>
+     <ClCompile Include="src\Core\dllmain.cpp" />
+     <ClCompile Include="src\Core\HotkeyManager.cpp" />
+     <ClCompile Include="src\Core\InputDevices.cpp" />
+@@ -333,6 +336,7 @@
+     <ClInclude Include="src\Palette\impl_format.h" />
+     <ClInclude Include="src\Palette\impl_templates.h" />
+     <ClInclude Include="src\Core\logger.h" />
++    <ClInclude Include="src\Core\ExitDiagnostics.h" />
+     <ClInclude Include="src\Core\HotkeyManager.h" />
+     <ClInclude Include="src\Core\InputDevices.h" />
+     <ClInclude Include="src\Core\Settings.h" />
