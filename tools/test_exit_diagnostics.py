@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='bbcf-exitdiag-') as folder:
               '/I' + str(repo / 'src'), '/I' + str(repo / 'depends/detour')]
     subprocess.run(common + ['/LD', str(repo / 'src/Core/ExitDiagnostics.cpp'),
                             str(repo / 'tools/exit_diagnostics_test_dll.cpp'),
-                            '/link', '/OUT:exit_test.dll',
+                            '/link', '/SAFESEH:NO', '/OUT:exit_test.dll',
                             '/LIBPATH:' + str(repo / 'depends/detour'), 'user32.lib'], cwd=work, check=True)
     subprocess.run(common + [str(repo / 'tools/exit_diagnostics_test.cpp'),
                             '/Fe:exit_test.exe', '/link', 'exit_test.lib', 'user32.lib'], cwd=work, check=True)
