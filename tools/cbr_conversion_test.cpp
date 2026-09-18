@@ -1,4 +1,7 @@
 #include "CbrReplayFile.h"
+#include "CbrRecordingQueue.h"
+#include "CbrFailedCapture.h"
+#include <map>
 #include <cassert>
 #include <iostream>
 #include <sstream>
@@ -160,7 +163,108 @@ static void testKaguraOrbs() {
     }
 }
 
+
+static AnnotatedReplay withIdentity(AnnotatedReplay source, uint64_t id) {
+    AnnotatedReplay copy("Queue test", "ny", "jb", 0, 1, id);
+    for (int i = 0; i < source.MetadataSize(); ++i)
+        copy.AddFrame(source.CopyMetadataPtr(i), source.getInputPtr()->at(i));
+    return copy;
+}
+
+static void testRecordingQueue() {
+    using Batch = std::vector<CbrReplayFile>;
+    std::map<uint64_t, Batch> disk;
+    std::vector<std::string> failures;
+    int saved = 0, rejected = 0, conversions = 0;
+    bool failPreservation = false, failCommit = false;
+    uint64_t failingId = 0;
+    auto load = [&](AnnotatedReplay& first) { return disk[first.getSteamId()]; };
+    auto convert = [&](AnnotatedReplay& raw, Batch& data) {
+        ++conversions;
+        CbrReplayFile converted(raw.getCharacterName(), raw.getCharIds());
+        auto error = converted.makeFullCaseBase(&raw, raw.getFocusCharName());
+        if (!error.errorCount) data.push_back(converted);
+        return error;
+    };
+    auto preserve = [&](AnnotatedReplay& raw, const CbrGenerationError& error) {
+        // A file in place of the directory exercises a real filesystem failure.
+        const boost::filesystem::path root = failPreservation ? "blocked-capture-root" : "failed-captures";
+        const auto path = PreserveCbrFailedCapture(raw, 2, error.errorDetail, "test-build", root);
+        auto restored = ReadCbrFailedCapture(path);
+        assert(restored.slot == 2 && restored.build == "test-build");
+        assert(restored.replay.getSteamId() == raw.getSteamId());
+        assert(restored.replay.getPlayerName() == raw.getPlayerName());
+        assert(restored.replay.getCharacterName() == raw.getCharacterName());
+        assert(restored.replay.getInput() == raw.getInput());
+        assert(restored.replay.MetadataSize() == raw.MetadataSize());
+        for (int i = 0; i < raw.MetadataSize(); ++i) {
+            const auto original = raw.CopyMetadataPtr(i), copy = restored.replay.CopyMetadataPtr(i);
+            assert(copy->getFrameCount() == original->getFrameCount());
+            assert(copy->facing == original->facing);
+            assert(copy->currentAction == original->currentAction);
+            assert(copy->opponentId == original->opponentId);
+            assert(copy->hitMinY == original->hitMinY);
+        }
+        CbrReplayFile retry(restored.replay.getCharacterName(), restored.replay.getCharIds());
+        const auto reproduced = retry.makeFullCaseBase(&restored.replay, restored.replay.getFocusCharName());
+        assert(reproduced.errorCount == error.errorCount);
+        assert(reproduced.errorDetail == restored.diagnostic);
+        failures.push_back(path);
+    };
+    auto retire = [&](int good, int bad) { saved += good; rejected += bad; };
+    auto run = [&](std::vector<AnnotatedReplay>& queue) {
+        uint64_t groupId = 0;
+        SaveCbrRecordingQueue(queue,
+            [&](AnnotatedReplay& raw) { groupId = raw.getSteamId(); return load(raw); },
+            convert, preserve,
+            [&](Batch& data) {
+                if (failCommit && groupId == failingId) throw std::runtime_error("Injected database write failure");
+                disk[groupId] = data;
+            }, retire);
+    };
+    auto good = withIdentity(recording(true, true), 101);
+    auto bad = withIdentity(recording(false, false), 101);
+    bad.CopyMetadataPtr(123)->opponentId = 27;
+    bad.CopyMetadataPtr(123)->hitMinY = 73;
+    // The same identity has valid recordings on both sides of two failures.
+    std::vector<AnnotatedReplay> p1{good, bad, good, bad, withIdentity(good, 202)};
+    std::vector<AnnotatedReplay> p2{withIdentity(bad, 303), withIdentity(good, 404)};
+    run(p1); run(p2);
+    assert(p1.empty() && p2.empty());
+    assert(saved == 4 && rejected == 3 && conversions == 7);
+    assert(disk[101].size() == 2 && disk[202].size() == 1 && disk[404].size() == 1);
+    assert(disk[303].empty()); // An all-failed group never writes a .cbr.
+    assert(failures.size() == 3 && failures[0] != failures[1] && failures[1] != failures[2]);
+    p1.push_back(good); // A later match still saves, with no retry of failed captures.
+    run(p1);
+    assert(saved == 5 && rejected == 3 && conversions == 8 && disk[101].size() == 3);
+
+    // Failure to persist a bad capture must leave it and all uncommitted good
+    // captures in memory, without changing the existing database.
+    { std::ofstream blocked("blocked-capture-root"); blocked << "not a directory"; }
+    failPreservation = true;
+    p1 = {good, bad, good};
+    try { run(p1); assert(false); } catch (const boost::filesystem::filesystem_error&) {}
+    assert(p1.size() == 3 && disk[101].size() == 3 && failures.size() == 3);
+    failPreservation = false;
+    run(p1);
+    assert(p1.empty() && disk[101].size() == 5 && failures.size() == 4);
+
+    // If .cbr writing fails after a failed capture was archived, retry only
+    // the valid captures. Neither successful groups nor diagnostics duplicate.
+    p1 = {withIdentity(good, 505), withIdentity(good, 606), withIdentity(bad, 606), withIdentity(good, 606)};
+    failCommit = true; failingId = 606;
+    try { run(p1); assert(false); } catch (const std::runtime_error&) {}
+    assert(p1.size() == 2 && p1[0].getSteamId() == 606);
+    assert(disk[505].size() == 1 && disk[606].empty() && failures.size() == 5);
+    failCommit = false;
+    run(p1);
+    assert(p1.empty() && disk[505].size() == 1 && disk[606].size() == 2 && failures.size() == 5);
+    std::cout << "CBR save isolation: mixed groups, both slots, later batches, capture round-trip, IO failure and retry passed\n";
+}
+
 int main() {
+    testRecordingQueue();
     testKaguraOrbs();
     // Exact physical inputs at the three TimelagShot starts in the report.
     const std::vector<std::pair<bool, std::vector<int>>> recordedMotions = {

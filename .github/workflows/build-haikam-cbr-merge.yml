@@ -39,7 +39,8 @@ jobs:
             "cbr-conversion-diagnostics.patch",
             "cbr-network-diagnostics.patch",
             "cbr-kagura-orb-directions.patch",
-            "cbr-exit-diagnostics.patch"
+            "cbr-exit-diagnostics.patch",
+            "cbr-save-failure-isolation.patch"
           )
 
           foreach ($patch in $patches) {

@@ -11,7 +11,7 @@ parser.add_argument('--boost-root', type=Path, required=True)
 args = parser.parse_args()
 repo = Path(__file__).resolve().parents[1]
 sources = [repo / 'tools/cbr_conversion_test.cpp'] + [repo / 'src/CBR' / name for name in (
-    'CbrReplayFile.cpp', 'AnnotatedReplay.cpp', 'Metadata.cpp', 'CbrCase.cpp')]
+    'CbrReplayFile.cpp', 'AnnotatedReplay.cpp', 'Metadata.cpp', 'CbrCase.cpp', 'Helper.cpp')]
 with tempfile.TemporaryDirectory(prefix='cbr-conversion-') as folder:
     binary = Path(folder) / ('test.exe' if os.name == 'nt' else 'test')
     if os.name == 'nt':
@@ -34,6 +34,7 @@ with tempfile.TemporaryDirectory(prefix='cbr-conversion-') as folder:
                    '-fsanitize=address,undefined', '-D_GLIBCXX_ASSERTIONS',
                    '-I', str(repo / 'src/CBR'), '-I', str(args.boost_root / 'include'),
                    *map(str, sources), '-o', str(binary), '-L', str(lib),
-                   '-Wl,-rpath,' + str(lib), '-l:libboost_serialization.so.1.83.0']
+                   '-Wl,-rpath,' + str(lib), '-l:libboost_serialization.so.1.83.0',
+                   '-l:libboost_iostreams.so.1.83.0', '-l:libboost_filesystem.so.1.83.0']
     subprocess.run(command, cwd=folder, check=True)
-    subprocess.run([str(binary)], check=True)
+    subprocess.run([str(binary)], cwd=folder, check=True)

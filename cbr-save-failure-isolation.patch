@@ -1,0 +1,143 @@
+--- a/src/CBR/CbrInterface.cpp
++++ b/src/CBR/CbrInterface.cpp
+@@ -2,6 +2,9 @@
+ #include "CbrInterface.h"
+ #include "CbrIdentity.h"
+ #include "CbrFileIO.h"
++#include "CbrRecordingQueue.h"
++#include "CbrFailedCapture.h"
++#include "Core/BuildInfo.autogen.h"
+ #include "Core/logger.h"
+ #include <mutex>
+ #include <boost/archive/text_iarchive.hpp>
+@@ -1059,6 +1062,7 @@
+ 	mergeCbrReplayBuffer();
+ 	if (playerID.empty()) playerID = GetPlayerID();
+ 	autoRecordSaveFailed = false;
++	autoRecordQuarantined = 0;
+ 	storageError.clear();
+ 	threadActive = true;
+ 	savingLocalSteamId = localSteamId;
+@@ -1182,47 +1186,63 @@
+     autoRecordDeletionAmount = { 0, 0 };
+     try {
+         const auto saveBuffer = [this](std::vector<AnnotatedReplay>& buffer, int slot) {
+-            while (!buffer.empty()) {
+-                auto& first = buffer.front();
+-                const auto id = first.getSteamId();
+-                const auto character = first.getFocusCharName();
+-                const auto filename = makeFilenameCbr(first.getPlayerName(), character, id);
+-                auto data = boost::filesystem::exists(filename)
+-                    ? LoadCbrDataNoThread(first.getPlayerName(), character, id)
+-                    : CbrData(first.getPlayerName(), character, first.getCharIds()[0], id);
+-                size_t count = 0;
+-                for (auto& replay : buffer) {
+-                    if (replay.getFocusCharName() != character ||
+-                        !SameCbrIdentity(id, first.getPlayerName(), replay.getSteamId(), replay.getPlayerName())) break;
++            unsigned inspected = 0;
++            SaveCbrRecordingQueue(buffer,
++                [this](AnnotatedReplay& first) {
++                    const auto filename = makeFilenameCbr(first.getPlayerName(), first.getFocusCharName(), first.getSteamId());
++                    return boost::filesystem::exists(filename)
++                        ? LoadCbrDataNoThread(first.getPlayerName(), first.getFocusCharName(), first.getSteamId())
++                        : CbrData(first.getPlayerName(), first.getFocusCharName(), first.getCharIds()[0], first.getSteamId());
++                },
++                [this, slot, &inspected](AnnotatedReplay& replay, CbrData& data) {
+                     auto converted = CbrReplayFile(replay.getCharacterName(), replay.getCharIds());
+-                    auto error = converted.makeFullCaseBase(&replay, replay.getFocusCharName());
++                    CbrGenerationError error{};
++                    try { error = converted.makeFullCaseBase(&replay, replay.getFocusCharName()); }
++                    catch (const std::bad_alloc&) { throw; }
++                    catch (const std::exception& e) {
++                        error.errorCount = 1;
++                        error.diagnosticSummary = "character=" + replay.getFocusCharName() + " conversion_exception=1";
++                        error.errorDetail = "[CONVERSION_EXCEPTION] " + error.diagnosticSummary + " what=" + e.what() + "\n";
++                    }
+                     ForceLog("[CBR-CONVERT] slot=%d recording=%u errors=%d %s", slot + 1,
+-                        static_cast<unsigned>(count + 1), error.errorCount, error.diagnosticSummary.c_str());
++                        ++inspected, error.errorCount, error.diagnosticSummary.c_str());
+                     if (!error.structure.empty()) saveStructureDebug(error.structure);
+                     debugErrorCounter[slot] += error.errorCount;
+-                    if (error.errorCount != 0) {
+-                        cbrCreationDebugStr += error.errorDetail;
+-                        saveDebug();
+-                        throw std::runtime_error("CBR conversion failed; pending recordings were retained.");
++                    if (!error.errorCount) {
++                        data.AddReplay(converted);
++                        data.setPlayerName(replay.getPlayerName());
+                     }
+-                    data.AddReplay(converted);
+-                    data.setPlayerName(replay.getPlayerName());
+-                    ++count;
+-                }
+-                if (!SaveCbrDataExperiment(data)) throw std::runtime_error(storageError);
+-                // Remove only the group actually committed. Retrying after a later
+-                // failure must not append these rounds a second time.
+-                buffer.erase(buffer.begin(), buffer.begin() + count);
+-                savingReplayCount -= static_cast<int>(count);
+-                autoRecordDeletionAmount[slot] += static_cast<int>(count);
+-                autoRecordSaveCompletedName[slot] = data.getPlayerName();
+-                autoRecordSaveCompletedChar[slot] = character;
+-                const bool ownData = id ? id == savingLocalSteamId : data.getPlayerName() == playerID;
+-                if (autoUploadOwnData && ownData) {
+-                    try { CbrHTTPPostNoThreat(convertCBRtoJson(data, playerID)); }
+-                    catch (const std::exception& e) { ForceLog("[CBR-ID] Local save succeeded, upload failed: %s", e.what()); }
+-                }
+-            }
++                    return error;
++                },
++                [this, slot](AnnotatedReplay& replay, const CbrGenerationError& error) {
++                    const auto path = PreserveCbrFailedCapture(replay, slot + 1,
++                        error.diagnosticSummary + "\n" + error.errorDetail,
++                        "commit=" BUILD_GIT_HASH " built=" BUILD_TIMESTAMP);
++                    ForceLog("[CBR-QUARANTINE] slot=%d steamid=%llu character=%s samples=%d errors=%d path='%s'",
++                        slot + 1, static_cast<unsigned long long>(replay.getSteamId()),
++                        replay.getFocusCharName().c_str(), replay.getInputSize(), error.errorCount, path.c_str());
++                    cbrCreationDebugStr += "\n[CBR-QUARANTINE] path='" + path + "'\n" + error.errorDetail;
++                    // The self-contained capture already has the complete report.
++                    // A secondary text-report error must not block other recordings.
++                    try { saveDebug(); }
++                    catch (const std::exception& e) { ForceLog("[CBR-QUARANTINE] Text report failed: %s", e.what()); }
++                },
++                [this, slot](CbrData& data) {
++                    if (!SaveCbrDataExperiment(data)) throw std::runtime_error(storageError);
++                    autoRecordSaveCompletedName[slot] = data.getPlayerName();
++                    autoRecordSaveCompletedChar[slot] = data.getCharName();
++                    const auto id = data.getSteamId();
++                    const bool ownData = id ? id == savingLocalSteamId : data.getPlayerName() == playerID;
++                    if (autoUploadOwnData && ownData) {
++                        try { CbrHTTPPostNoThreat(convertCBRtoJson(data, playerID)); }
++                        catch (const std::exception& e) { ForceLog("[CBR-ID] Local save succeeded, upload failed: %s", e.what()); }
++                    }
++                },
++                [this, slot](int saved, int quarantined) {
++                    savingReplayCount -= saved + quarantined;
++                    autoRecordDeletionAmount[slot] += saved;
++                    autoRecordQuarantined += quarantined;
++                });
+         };
+         saveBuffer(recordBufferP1, 0);
+         saveBuffer(recordBufferP2, 1);
+--- a/src/CBR/CbrInterface.h
++++ b/src/CBR/CbrInterface.h
+@@ -96,6 +96,7 @@
+ 	bool autoUploadOwnData = true;
+ 	bool autoRecordSaveCompleted = false;
+ 	bool autoRecordSaveFailed = false;
++	int autoRecordQuarantined = 0;
+ 	std::string storageError;
+ 	uint64_t localSteamId = 0;
+ 	std::array <std::string, 2> autoRecordSaveCompletedName = { "","" };
+--- a/src/Overlay/WindowManager.cpp
++++ b/src/Overlay/WindowManager.cpp
+@@ -101,6 +101,10 @@
+ 		{
+ 			if (cbr.autoRecordSaveFailed)
+                 g_notificationBar->AddNotification("CBR save failed. Pending recordings were retained. Check Data Manager for details and use the save hotkey to retry.");
++            else if (cbr.autoRecordQuarantined) {
++                g_notificationBar->AddNotification("CBR processing finished. %d failed recording(s) preserved in CBRsave/FailedRecordings. Automatic saving can continue.", cbr.autoRecordQuarantined);
++                LOG(1, "[CBR] Buffered replay save completed with %d quarantined recording(s).\n", cbr.autoRecordQuarantined);
++            }
+             else {
+                 g_notificationBar->AddNotification("CBR replay saving completed.");
+                 LOG(1, "[CBR] Buffered replay save completed.\n");
